@@ -1,0 +1,18 @@
+- id: agent-default-model
+  name: '@deepseek-ai/dsh-agent-default-model'
+  config:
+    provider: deepseek-official
+    model: !!js process.env.VOICE_MODEL
+    reasoningEffort: off
+- id: llm-deepseek
+  name: '@deepseek-ai/dsh-llm-deepseek-api-key'
+  config:
+    thinking: disabled
+    reasoningEffort: off
+- insert:
+    - id: voice-supervisor-lab
+      name: ./plugin.mjs
+      config:
+        token: !!js process.env.VOICE_LAB_TOKEN
+        readyFile: !!js process.env.VOICE_LAB_READY_FILE
+        cwd: !!js process.env.VOICE_LAB_CWD

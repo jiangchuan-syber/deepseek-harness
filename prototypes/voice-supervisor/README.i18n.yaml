@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write prototypes/voice-supervisor/README.md
+/voice-supervisor-laboratory:
+  en: 36d022fd734934ef
+  zh: bbcd16c4fbde824a
+/voice-supervisor-laboratory/documents:
+  en: 69fc6ba1b385f5bc
+  zh: 0f0e7ba5d029f313
+/voice-supervisor-laboratory/run:
+  en: 590ee834f529e53f
+  zh: af35d5aef2f1d391
+/voice-supervisor-laboratory/integration-behavior:
+  en: e8745d0ce7433dd4
+  zh: ebec23e7ea8b04fb
+/voice-supervisor-laboratory/limitations:
+  en: 7f5fb9dcde674165
+  zh: 5a101ccf37de2d13

@@ -1,0 +1,22 @@
+# Bilingual-pair consistency record for 2026-10-30-voice-supervisor-lab.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/proposed/architecture/2026-10-30-voice-supervisor-lab.md
+/agent-note-voice-supervisor-laboratory:
+  en: 5e5480feec7c455f
+  zh: 04d22ba0e6704c47
+/agent-note-voice-supervisor-laboratory/problem:
+  en: 5bea90ea73114281
+  zh: 14439806b8c46d9c
+/agent-note-voice-supervisor-laboratory/proposal:
+  en: 9fe1cf03bd00083c
+  zh: 90d2909017f2a63c
+/agent-note-voice-supervisor-laboratory/alternatives-considered:
+  en: ffd2dfe5f5a02577
+  zh: e47f436a5d4fe60a
+/agent-note-voice-supervisor-laboratory/acceptance-criteria:
+  en: 759390c948cf5a1a
+  zh: d62eb73e4bafa7cb
+/agent-note-voice-supervisor-laboratory/risks:
+  en: 7bf04913c27ca41e
+  zh: e23371ab2a7c8a5a

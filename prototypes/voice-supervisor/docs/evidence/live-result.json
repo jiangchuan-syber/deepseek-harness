@@ -1,0 +1,133 @@
+{
+  "success": true,
+  "checks": {
+    "partialPlayback": true,
+    "noCompletedChildBeforeFollowup": true,
+    "parentRespondedBeforeChildEnd": true,
+    "deliveryLogged": true,
+    "schedulerAcknowledgedBoundary": true,
+    "realTaskArtifact": true,
+    "schedulerReportedArtifact": true,
+    "naturalHandoff": true,
+    "noPollErrors": true
+  },
+  "metrics": {
+    "promptAcceptMs": [
+      1648.5301,
+      6.2321999999985565
+    ],
+    "schedulerInitialAnswerMs": 4589,
+    "virtualInterruptMs": 0.40090000000054715,
+    "followupResponseMs": 2473,
+    "handoffGapMs": 2338.140166666667,
+    "nativeChildDurationMs": 28879,
+    "totalMs": 50553.5319,
+    "fronts": [
+      {
+        "turnId": "turn-1",
+        "model": "deepseek-flash",
+        "thinking": "disabled",
+        "firstTokenMs": 862.552499999998,
+        "completeMs": 974.4397999999965
+      },
+      {
+        "turnId": "turn-2",
+        "model": "deepseek-flash",
+        "thinking": "disabled",
+        "firstTokenMs": 576.7799999999988,
+        "completeMs": 719.1297999999988
+      }
+    ],
+    "simulation": {
+      "asr": "predefined final text, zero recognition delay",
+      "tts": "zero synthesis delay, exact character alignment",
+      "playbackCharsPerSecond": 9,
+      "hardware": false
+    }
+  },
+  "initial": "我已经安排后台子任务校验样例文件，完成后会把实际结果告诉你。",
+  "progress": "【进度】你已听到的回答前缀是：“我已经安排”（这段播放到一半被打断）；还没有播完、设备未播放的部分是：“后台子任务校验样例文件，完成后会把实际结果告诉你。”，因此这部分不能算作你已了解的内容。我向你转达的“听到了你的要求”只是设备播放回执，不代表你已理解。子任务仍在后台执行，我没有等待、没有重新执行，也不会重复创建。",
+  "final": "【结果】后台子任务已成功完成对样例文件的校验：`node worker-task.mjs` 退出码为 0，并在工作目录生成了 worker-result.json，其中 SHA256 = `aa81f54ba431a86d215ef646a4694d588d14f33008f81ce565591c58031f2743`，字节数 = 34。子任务没有修改其他文件，也没有继续委派。请注意：之前被打断的那句里的“完成后会把实际结果告诉你”，现在才真正送达。",
+  "artifact": {
+    "sha256": "aa81f54ba431a86d215ef646a4694d588d14f33008f81ce565591c58031f2743",
+    "bytes": 34
+  },
+  "delivery": {
+    "priorEpoch": 0,
+    "epoch": 1,
+    "outputs": [
+      {
+        "outputId": "output-1",
+        "turnId": "turn-1",
+        "role": "intro",
+        "state": "completed",
+        "playedText": "好的，我听到了你的要求。",
+        "unplayedText": "",
+        "alignment": "virtual-character-clock",
+        "epoch": 0
+      },
+      {
+        "outputId": "output-2",
+        "turnId": "turn-1",
+        "role": "answer",
+        "state": "interrupted",
+        "playedText": "我已经安排",
+        "unplayedText": "后台子任务校验样例文件，完成后会把实际结果告诉你。",
+        "alignment": "virtual-character-clock",
+        "epoch": 0
+      }
+    ]
+  },
+  "playback": [
+    {
+      "outputId": "output-1",
+      "turnId": "turn-1",
+      "role": "intro",
+      "state": "completed",
+      "playedText": "好的，我听到了你的要求。",
+      "unplayedText": "",
+      "alignment": "virtual-character-clock",
+      "epoch": 0
+    },
+    {
+      "outputId": "output-2",
+      "turnId": "turn-1",
+      "role": "answer",
+      "state": "interrupted",
+      "playedText": "我已经安排",
+      "unplayedText": "后台子任务校验样例文件，完成后会把实际结果告诉你。",
+      "alignment": "virtual-character-clock",
+      "epoch": 0
+    },
+    {
+      "outputId": "output-3",
+      "turnId": "turn-2",
+      "role": "intro",
+      "state": "completed",
+      "playedText": "收到，我来确认一下当前进展。",
+      "unplayedText": "",
+      "alignment": "virtual-character-clock",
+      "epoch": 1
+    },
+    {
+      "outputId": "output-4",
+      "turnId": "turn-2",
+      "role": "answer",
+      "state": "completed",
+      "playedText": "【进度】你已听到的回答前缀是：“我已经安排”（这段播放到一半被打断）；还没有播完、设备未播放的部分是：“后台子任务校验样例文件，完成后会把实际结果告诉你。”，因此这部分不能算作你已了解的内容。我向你转达的“听到了你的要求”只是设备播放回执，不代表你已理解。子任务仍在后台执行，我没有等待、没有重新执行，也不会重复创建。",
+      "unplayedText": "",
+      "alignment": "virtual-character-clock",
+      "epoch": 1
+    },
+    {
+      "outputId": "output-5",
+      "turnId": "turn-2",
+      "role": "answer",
+      "state": "completed",
+      "playedText": "【结果】后台子任务已成功完成对样例文件的校验：`node worker-task.mjs` 退出码为 0，并在工作目录生成了 worker-result.json，其中 SHA256 = `aa81f54ba431a86d215ef646a4694d588d14f33008f81ce565591c58031f2743`，字节数 = 34。子任务没有修改其他文件，也没有继续委派。请注意：之前被打断的那句里的“完成后会把实际结果告诉你”，现在才真正送达。",
+      "unplayedText": "",
+      "alignment": "virtual-character-clock",
+      "epoch": 1
+    }
+  ]
+}

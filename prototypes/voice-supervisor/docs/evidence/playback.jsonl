@@ -1,0 +1,10 @@
+{"type":"started","id":"output-1","role":"intro","at":974.6322}
+{"type":"completed","id":"output-1","role":"intro","at":2307.965533333333}
+{"type":"started","id":"output-2","role":"answer","at":4646.1057}
+{"type":"interrupted","id":"output-2","at":5207.7448,"playedChars":5}
+{"type":"started","id":"output-3","role":"intro","at":5924.174600000002}
+{"type":"completed","id":"output-3","role":"intro","at":7479.730155555558}
+{"type":"started","id":"output-4","role":"answer","at":7756.324800000002}
+{"type":"completed","id":"output-4","role":"answer","at":25422.99146666667}
+{"type":"started","id":"output-5","role":"answer","at":32781.3107}
+{"type":"completed","id":"output-5","role":"answer","at":58003.53292222222}

@@ -1,0 +1,9 @@
+{
+  "plugins": [],
+  "categories": { "correctness": "error" },
+  "env": { "node": true, "es2025": true },
+  "ignorePatterns": [".runs/**"],
+  "rules": {
+    "no-unused-vars": ["error", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }]
+  }
+}
