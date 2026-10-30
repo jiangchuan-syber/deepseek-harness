@@ -28,6 +28,14 @@ The live command creates a private test home and workspace under `.runs/`, launc
 
 A successful run writes `result.json`, `events.jsonl`, `playback.jsonl`, `process.json`, and `harness.log`. Model failures cause a failing exit code; no recorded model response is used as a substitute. ASR, TTS, and playback timing are explicitly virtual. The worker's 22-second wait is a test window for parent interaction, not a performance measurement.
 
+## Manual test page
+
+After the prerequisites above, run `node prototypes/voice-supervisor/interactive.mjs` and open the loopback URL printed in the terminal. Keep that process running. The page accepts text as simulated ASR input, displays virtual playback at nine characters per second, and uses real DeepSeek calls and native Harness child tasks. It produces no sound and requests no microphone permission.
+
+Click the sample-check button, interrupt playback with the red button or Escape, then ask for progress. Green text is the simulated played prefix; grey text is unplayed. Sending another message also interrupts older audio and attaches its delivery receipt. Stopping playback leaves workers running; each active child has a separate stop-request button. A stop request is not proof of completion. The page displays child lifecycle events and fast-model timings. The task prompt requests delegation and confines work to the fixture directory, but these are model instructions, not an operating-system sandbox.
+
+The local interface binds only to `127.0.0.1`, keeps the model API key on the server, and uses a separate token for local API calls. It uses a fresh test home; exit with Ctrl+C to stop the runner and write the interaction record under `.runs/`. Refreshing the page preserves the running session. Restarting creates a new session. Do not use this development runner for untrusted tasks.
+
 ## Integration behavior
 
 Prompt admission returns HTTP 202 without waiting for whole-agent idle. Native session events are polled with an ordered cursor; an expired cursor returns 410 instead of silently losing events. Outputs belong to a main-session stream, not exclusively to the most recently accepted user message. Client code must retain the native sequence and turn identifiers when mapping overlapping work.

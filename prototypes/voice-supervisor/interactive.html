@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>三角色语音调度 · 本机测试</title><link rel="stylesheet" href="/app.css"><script src="/app.js" defer></script></head>
+<body><main><h1>三角色语音调度 · 本机测试</h1><p>真实 DeepSeek 接话与调度，原生后台子任务。文字模拟 ASR，逐字高亮模拟 TTS 播放；本页面不发声。</p>
+<p id="status">正在连接…</p><section><h2>试一遍</h2><p>① 点击“后台校验样例”　② 等调度器开始播放，点击“打断”或按 Esc　③ 点击“询问进度”　④ 等后台任务结果。</p>
+<button id="sample">后台校验样例</button><button id="progress">询问进度</button><button id="interrupt">打断播放 · Esc</button></section>
+<form id="form"><label for="input">你的消息（模拟语音识别后的文字）</label><textarea id="input" rows="3" placeholder="例如：帮我在后台校验样例文件，完成后告诉我结果。"></textarea><button id="send" type="submit">发送</button><span id="notice"></span></form>
+<div class="columns"><section><h2>播放队列</h2><p>绿色是已模拟播放的内容，灰色是尚未播放；打断时按此位置截断。</p><div id="playback"></div></section><section><h2>对话与任务</h2><div id="messages"></div></section></div>
+<section><h2>后台子任务</h2><div id="children"></div><h2>本次指标</h2><pre id="metrics"></pre><details><summary>本次工作目录</summary><pre id="workspace"></pre></details></section>
+</main></body></html>
