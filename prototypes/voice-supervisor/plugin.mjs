@@ -8,7 +8,7 @@ import { publicSessionEvent } from './trace.mjs';
 
 /** Opt-in local experiment. Mount through a dsh profile; no installed source is modified. */
 export const name = 'voice-supervisor-lab';
-export const inject = ['sessionController', 'agents', 'workspaceRegistry', 'subagents', 'tools'];
+export const inject = ['sessionController', 'agents', 'workspaceRegistry', 'subagents', 'tools', 'systemPrompt'];
 export async function apply(ctx, config) {
   if (!config.token || !config.readyFile || !config.cwd) throw new Error('token, readyFile, cwd required');
   const workspace = await ctx.workspaceRegistry.create(config.cwd, 'Voice supervisor isolated lab');
@@ -28,6 +28,10 @@ export async function apply(ctx, config) {
   };
   const parent = ctx.agents.get(sessionId);
   if (!parent) throw new Error('Native parent was not created');
+  ctx.effect(() => parent.ctx.systemPrompt.section({
+    name: 'voice-supervisor:spoken-output', order: 10000,
+    text: '你的面向用户回复将直接交给 TTS 朗读。快速回应、任务安排、进度说明和子代理结果汇总都必须适合口语播报。报告文件产物时只说简短文件名、文档标题或“文档已生成”，不要说出或附带绝对路径、相对路径、目录层级、file:// 地址，也不要生成带本地路径的 Markdown 链接。不要照搬工具或子代理回传中的文件路径。实际路径仅保留在工具参数、工具返回和任务日志中；工具执行仍须使用准确路径。',
+  }), 'voice-supervisor.spoken-output');
   let phase = 'idle', owner = null, activity = 'idle';
   const undelivered = new Map(), firstDeltas = new Set();
   const owners = new Map();
