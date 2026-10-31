@@ -1,0 +1,13 @@
+{
+  "nativeParentPreserved": true,
+  "source": "synthetic text; recording and ASR skipped",
+  "frontReplies": 1,
+  "childStarted": 1,
+  "childEnded": 1,
+  "parentReceivedResult": true,
+  "schedulerReplies": 2,
+  "deviceCompletedChunks": 10,
+  "device": "online",
+  "finalStatus": "播报完成，可以开始下一轮",
+  "errors": []
+}

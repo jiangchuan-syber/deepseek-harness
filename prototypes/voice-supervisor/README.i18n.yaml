@@ -3,20 +3,20 @@
 # After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write prototypes/voice-supervisor/README.md
 /voice-supervisor-laboratory:
-  en: 36d022fd734934ef
-  zh: bbcd16c4fbde824a
+  en: 6fa74d3ee2fa2b57
+  zh: 61c7146f2362f00d
 /voice-supervisor-laboratory/documents:
-  en: 69fc6ba1b385f5bc
-  zh: 0f0e7ba5d029f313
+  en: 1352d7f3ced49cf5
+  zh: 8705318b4495ab1b
 /voice-supervisor-laboratory/run:
-  en: 590ee834f529e53f
-  zh: af35d5aef2f1d391
+  en: f7200561e386b4ba
+  zh: d518f1c64e5f6123
 /voice-supervisor-laboratory/manual-test-page:
-  en: 8ade56cfc21e0187
-  zh: 5b5235011ed6c7c6
+  en: 49b1364d5c345034
+  zh: 075a411ac62c0adf
 /voice-supervisor-laboratory/integration-behavior:
-  en: e8745d0ce7433dd4
-  zh: ebec23e7ea8b04fb
+  en: 1d60e8f9ff5c2e7a
+  zh: ec85b04af7da4ef3
 /voice-supervisor-laboratory/limitations:
-  en: 7f5fb9dcde674165
-  zh: 5a101ccf37de2d13
+  en: 1e9bbc90d4ca79ed
+  zh: f2152683dc0f0a98

@@ -6,41 +6,41 @@ import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import { PlaybackQueue } from './playback.mjs';
-import { quickReply } from './front.mjs';
 import { nativeTrace, traceState } from './trace.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '../..');
 if (!process.env.DEEPSEEK_API_KEY) throw new Error('DEEPSEEK_API_KEY required');
 const model = process.env.VOICE_MODEL ?? 'deepseek-flash';
-const runDir = join(here, '.runs', 'interactive-' + new Date().toISOString().replaceAll(':', '-'));
+const runDir = process.env.VOICE_LAB_RESUME_DIR ?? join(here, '.runs', 'interactive-' + new Date().toISOString().replaceAll(':', '-'));
 const fixture = join(runDir, 'workspace');
 mkdirSync(fixture, { recursive: true });
-writeFileSync(join(fixture, 'sample.txt'), 'voice-supervisor-reusable-fixture\n');
-writeFileSync(join(fixture, 'worker-task.mjs'), "import{readFileSync,writeFileSync}from'node:fs';import{createHash}from'node:crypto';import{setTimeout as wait}from'node:timers/promises';await wait(22000);const b=readFileSync('sample.txt');const r={sha256:createHash('sha256').update(b).digest('hex'),bytes:b.length};writeFileSync('worker-result.json',JSON.stringify(r));console.log(JSON.stringify(r));\n");
-const token = randomUUID(), uiToken = randomUUID(), readyFile = join(runDir, 'ready.json');
+if (!existsSync(join(fixture, 'sample.txt'))) writeFileSync(join(fixture, 'sample.txt'), 'voice-supervisor-reusable-fixture\n');
+if (!existsSync(join(fixture, 'worker-task.mjs'))) writeFileSync(join(fixture, 'worker-task.mjs'), "import{readFileSync,writeFileSync}from'node:fs';import{createHash}from'node:crypto';import{setTimeout as wait}from'node:timers/promises';await wait(22000);const b=readFileSync('sample.txt');const r={sha256:createHash('sha256').update(b).digest('hex'),bytes:b.length};writeFileSync('worker-result.json',JSON.stringify(r));console.log(JSON.stringify(r));\n");
+const token = randomUUID(), uiToken = randomUUID(), readyFile = join(runDir, 'ready-' + randomUUID() + '.json');
 const env = { ...process.env, DSH_HOME: join(runDir, 'home'), DSH_PERMISSION_MODE: 'danger-full-access',
   DEEPSEEK_BASE_URL: 'https://api.deepseek.com/anthropic', DSH_TELEMETRY_MODE: 'DISABLED', VOICE_MODEL: model,
   VOICE_LAB_TOKEN: token, VOICE_LAB_READY_FILE: readyFile.replaceAll('\\', '/'), VOICE_LAB_CWD: fixture.replaceAll('\\', '/') };
 for (const name of Object.keys(env)) if (/^(https?|all)_proxy$/i.test(name)) delete env[name];
 const patch = join(runDir, 'overlay.yml');
 writeFileSync(patch, readFileSync(join(here, 'overlay.yml'), 'utf8').replace('name: ./plugin.mjs', 'name: ' + JSON.stringify(join(here, 'plugin.mjs').replaceAll('\\', '/'))));
-const log = createWriteStream(join(runDir, 'harness.log'));
+const log = createWriteStream(join(runDir, 'harness.log'), { flags: 'a' });
 const harness = spawn(process.execPath, ['--import', 'tsx/esm', 'apps/cli/src/bin.ts', '--profile', 'web', '--patch', patch,
   '--no-open', '--host', '127.0.0.1', '--port', '0'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+const harnessExit = new Promise(done => harness.once('exit', done));
 harness.stdout.pipe(log); harness.stderr.pipe(log);
 let exited = false, port, sessionId, cursor = 0, polling = false, current = null, pendingDelivery = null;
 const player = new PlaybackQueue({ charsPerSecond: 9 });
-const messages = [], metrics = [], turnEpochs = new Map();
+const messages = [], metrics = [], requests = new Map(), attempts = new Map();
 const traces = [], childOwners = new Map();
-let traceSequence = 0;
+let traceSequence = existsSync(join(runDir, 'trace.jsonl')) ? readFileSync(join(runDir, 'trace.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line).sequence).at(-1) ?? 0 : 0;
 function trace(event, owner = current) {
   const item = { requestId: owner?.id, voiceSessionId: owner?.voiceSessionId, ...event, sequence: ++traceSequence };
   traces.push(item); if (traces.length > 2000) traces.shift();
   appendFileSync(join(runDir, 'trace.jsonl'), JSON.stringify(item) + '\n');
 }
-let nativeState = {}, lastError = '', configured = false, activeNativeTurn;
-function message(role, text, owner = current) { messages.push({ role, text, at: Date.now(), requestId: owner?.id }); }
+let nativeState = {}, lastError = '';
+function message(role, text, owner = current, extra = {}) { const item = { role, text, at: Date.now(), requestId: owner?.id ?? owner?.requestId, ...extra }; messages.push(item); appendFileSync(join(runDir, 'speech-outbox.jsonl'), JSON.stringify(item) + '\n'); }
 harness.on('exit', (code, signal) => { exited = true; lastError = `Harness stopped (${code ?? signal})`; });
 async function api(path, body) {
   const r = await fetch(`http://127.0.0.1:${port}${path}`, { method: body === undefined ? 'GET' : 'POST',
@@ -50,7 +50,10 @@ async function api(path, body) {
 }
 const deadline = Date.now() + 90000;
 while (!existsSync(readyFile)) {
-  if (exited || Date.now() > deadline) throw new Error(lastError || 'Harness startup timeout');
+  if (exited || Date.now() > deadline) {
+    await stopHarness();
+    throw new Error(lastError || 'Harness startup timeout; inspect the private run log');
+  }
   await delay(100);
 }
 ({ port, sessionId } = JSON.parse(readFileSync(readyFile, 'utf8')));
@@ -61,26 +64,44 @@ const poller = setInterval(async () => {
   try {
     const batch = await api(`/events?after=${cursor}`); cursor = batch.sequence;
     for (const e of batch.events) {
-      if (e.type === 'child.started') childOwners.set(e.data.id, current ? { ...current } : null);
+      const suppliedOwner = e.data?.owner;
+      const eventOwner = suppliedOwner ? requests.get(suppliedOwner.requestId) ?? { id: suppliedOwner.requestId, voiceSessionId: suppliedOwner.voiceSessionId } : current;
+      if (e.type === 'stage' || e.type === 'phase') {
+        trace({ at: e.time, kind: e.type === 'stage' && e.data.kind === 'input.queued' ? 'input.queued' : 'scheduler.phase',
+          actor: '主调度器', title: e.type === 'phase' ? '主调度阶段更新' : '输入队列更新', details: e.data },
+          requests.get(e.data.job?.requestId) ?? eventOwner);
+      }
+      if (e.type === 'model.started') {
+        attempts.set(e.data.attemptId, { started: e.time, phase: e.data.phase });
+        trace({ at: e.time, kind: e.data.phase === 'quick' ? 'front.request' : 'scheduler.request', actor: '主调度器',
+          title: e.data.phase === 'quick' ? '同一主调度快速回应' : '正在思考中',
+          details: { model, reasoningEffort: e.data.reasoningEffort, thinking: e.data.reasoningEffort === 'off' ? 'disabled' : 'enabled' } }, eventOwner);
+      }
+      if (e.type === 'model.delta') {
+        const timing = attempts.get(e.data.attemptId);
+        if (timing) { timing.firstTokenMs ??= e.data.time - timing.started;
+          if (e.data.category === 'text-delta') timing.firstTextMs ??= e.data.time - timing.started; }
+        trace({ at: e.time, kind: 'scheduler.token', actor: '主调度器', title: '收到模型首增量',
+          details: { category: e.data.category, ...timing } }, eventOwner);
+      }
+      if (e.type === 'child.started') childOwners.set(e.data.id, eventOwner);
       const projected = nativeTrace(e, sessionId);
-      if (projected) trace(projected, projected.childId ? childOwners.get(projected.childId) ?? current : turnEpochs.get(activeNativeTurn) ?? current);
-      if (e.type === 'child.started') message('任务', '子任务已启动：' + e.data.id);
-      if (e.type === 'child.ended') message('任务', '子任务已结束：' + e.data.id);
-      if (e.type !== 'session' || e.data.sessionId !== sessionId) continue;
+      if (projected) {
+        if (projected.kind === 'front.reply') {
+          const timing = [...attempts.values()].filter(item => item.phase === 'quick').at(-1);
+          projected.details = { model, sameSession: true, firstTokenMs: timing?.firstTextMs,
+            completeMs: timing ? e.time - timing.started : undefined };
+        }
+        trace(projected, projected.childId ? childOwners.get(projected.childId) ?? eventOwner : eventOwner);
+      }
+      if (e.type === 'stage' && e.data.kind === 'phase.error') message('错误', '调度阶段失败：' + e.data.error, requests.get(e.data.job.requestId));
+      if (e.type !== 'session' || e.data.sessionId !== sessionId || e.data.event.type !== 'assistant/message') continue;
       const event = e.data.event;
-      if (event.type === 'turn/start') {
-        activeNativeTurn = event.data.turn;
-        if (current) turnEpochs.set(activeNativeTurn, { ...current });
-      }
-      if (event.type === 'user/message' && event.data.source?.rpcId === current?.id) {
-        turnEpochs.set(activeNativeTurn, { ...current });
-      }
-      if (event.type !== 'assistant/message') continue;
-      const text = (event.data.message.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('');
-      if (!text) continue;
-      const owner = turnEpochs.get(activeNativeTurn);
-      message('调度器', text, owner);
-      if (owner) player.offer({ turnId: owner.id, role: 'answer', text, epoch: owner.epoch });
+      const text = (event.data.message.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('').trim();
+      if (!text || text === '无需补充') continue;
+      const quick = e.data.phase === 'quick';
+      message(quick ? '快速接话' : '调度器', text, eventOwner, { messageId: event.data.message.id, phase: quick ? 'quick' : 'thinking' });
+      if (eventOwner?.epoch === player.epoch) player.offer({ turnId: eventOwner.id, role: quick ? 'intro' : 'answer', text, epoch: eventOwner.epoch });
     }
     nativeState = await api('/state');
   } catch (error) { lastError = error.message; }
@@ -99,25 +120,12 @@ async function sendInput(text, id, deviceDelivery, source, voiceSessionId) {
   current = { id, epoch, voiceSessionId }; message('你', text);
   trace({ at: Date.now(), kind: 'input.accepted', actor: source === 'esp32' ? 'ESP32 → 调度入口' : '网页输入', title: '文字输入已接收', text,
     details: { source, delivery } });
-  const start = performance.now();
-  trace({ at: Date.now(), kind: 'front.request', actor: '快速接话模型', title: '请求快速接话', details: { model, thinking: 'disabled' } });
-  const front = quickReply({ key: process.env.DEEPSEEK_API_KEY, model, text, signal: AbortSignal.timeout(20000) })
-    .then(result => { metrics.push({ firstTokenMs: result.firstTokenMs, completeMs: result.completeMs });
-      trace({ at: Date.now(), kind: 'front.reply', actor: '快速接话模型', title: '快速接话已生成', text: result.text,
-        details: { model, firstTokenMs: result.firstTokenMs, completeMs: result.completeMs } }, { id, voiceSessionId });
-      message('快速接话', result.text, { id }); player.offer({ turnId: id, role: 'intro', text: result.text, epoch }); })
-    .catch(error => { player.failIntro(id); message('错误', '接话模型：' + error.message, { id });
-      trace({ at: Date.now(), kind: 'front.error', actor: '快速接话模型', title: '接话失败，允许主回复继续', text: error.message }, { id, voiceSessionId }); });
-  const instructions = configured ? '' : `你是语音主调度器，最高优先级是响应用户。简单问题与短任务可以自己回答或直接调用原生工具；需要长时间执行、复杂执行或并行工作时，按需调用原生subagent工具委派，不强制每次创建子代理。委派后立即简短告诉用户已经安排，不调用wait_agents阻塞等待；继续接收用户输入。原生子代理消息进入你的上下文后，你结合用户诉求整理真实结果再回答，子代理不能直接抢占语音。输出面向用户的简短中文。用户说停止或暂停任务时，调用原生subagent中断相应任务，并如实报告状态。工作目录是 ${fixture.replaceAll('\\', '/')}。样例任务可委派子任务用pwsh执行 node worker-task.mjs，它等待22秒后校验sample.txt，生成worker-result.json；不得修改此目录外文件。下方播放回执的已播放内容不等于用户已经理解。\n\n用户：`;
-  configured = true;
-  trace({ at: Date.now(), kind: 'scheduler.request', actor: '主调度器', title: '向持久主会话发送输入',
-    details: { sessionId, model, thinking: 'disabled', mode: 'steer', concurrentWithFront: true } });
-  try { await api('/prompt', { requestId: id, text: instructions + text, delivery });
-    metrics.push({ promptAcceptedMs: performance.now() - start }); }
+  requests.set(id, { id, epoch, voiceSessionId });
+  try { await api('/prompt', { requestId: id, text, delivery, voiceSessionId }); }
   catch (error) { message('错误', '调度器：' + error.message, { id }); }
-  await front;
+
 }
-let busy = false;
+let busy = 0;
 const server = createServer(async (req, res) => {
   const respond = (status, data, type = 'application/json') => { res.writeHead(status, { 'content-type': type, 'cache-control': 'no-store',
     'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'" }); res.end(typeof data === 'string' ? data : JSON.stringify(data)); };
@@ -137,18 +145,23 @@ const server = createServer(async (req, res) => {
         gap: traces.length > 0 && after > 0 && after < traces[0].sequence - 1 });
     }
     if (req.method === 'GET' && url.pathname === '/state') return respond(200, { messages, metrics, delivery: player.delivery(),
-      playing: player.playing?.id, nativeState, lastError, alive: !exited, busy, workspace: fixture });
+      playing: player.playing?.id, nativeState, lastError, alive: !exited, busy: busy > 0, workspace: fixture });
     if (req.method !== 'POST') return respond(404, { error: 'Not found' });
     const chunks = []; let bytes = 0;
     for await (const chunk of req) { bytes += chunk.length; if (bytes > 16384) return respond(413, { error: 'Input too large' }); chunks.push(chunk); }
     const input = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+    if (url.pathname === '/shutdown') { respond(202, { accepted: true }); void shutdown(); return; }
+    if (url.pathname === '/delivery') {
+      const receipt = await api('/delivery', input);
+      appendFileSync(join(runDir, 'speech-outbox.jsonl'), JSON.stringify({ at: Date.now(), type: 'device-completed', ...input }) + '\n');
+      return respond(200, receipt);
+    }
     if (url.pathname === '/interrupt') return respond(200, interrupt());
     if (url.pathname === '/send') {
-      if (busy) return respond(409, { error: '上一条输入仍在接收，请稍后再发；可以随时打断播放。' });
       if (exited) return respond(503, { error: lastError });
       if (typeof input.text !== 'string' || !input.text.trim()) return respond(400, { error: '请输入内容' });
       const requestId = randomUUID(), messageCursor = messages.length;
-      busy = true; void sendInput(input.text.trim(), requestId, input.delivery, input.source, input.voiceSessionId).catch(e => { lastError = e.message; }).finally(() => { busy = false; });
+      busy++; void sendInput(input.text.trim(), requestId, input.delivery, input.source, input.voiceSessionId).catch(e => { lastError = e.message; }).finally(() => { busy--; });
       return respond(202, { accepted: true, requestId, messageCursor });
     }
     if (url.pathname === '/interrupt-child') return respond(202, await api('/interrupt-child', { childId: input.childId }));
@@ -165,7 +178,15 @@ let stopping = false;
 async function shutdown() {
   if (stopping) return; stopping = true; clearInterval(timer); clearInterval(poller);
   writeFileSync(join(runDir, 'interactive-result.json'), JSON.stringify({ messages, metrics, playback: player.delivery() }, null, 2));
-  server.closeAllConnections(); server.close(); harness.kill('SIGINT');
-  await delay(1500); if (!exited) harness.kill('SIGKILL'); process.exit(0);
+  server.closeAllConnections(); server.close();
+  await stopHarness();
+  process.exit(0);
+}
+async function stopHarness() {
+  if (!exited) harness.kill('SIGINT');
+  await Promise.race([harnessExit, delay(5000)]);
+  if (!exited) harness.kill('SIGKILL');
+  await harnessExit;
+  await new Promise(done => log.end(done));
 }
 process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);

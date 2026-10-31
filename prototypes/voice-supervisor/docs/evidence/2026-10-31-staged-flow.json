@@ -1,0 +1,31 @@
+{
+  "date": "2026-10-31T06:50:43.333Z",
+  "provider": "deepseek-official",
+  "model": "deepseek-flash",
+  "observedThinking": true,
+  "acceptedInputDuringThinking": true,
+  "nativeUserInputs": 2,
+  "quickRequestsWithoutTools": 2,
+  "deepRequestHeaders": 3,
+  "internalContinuations": 2,
+  "childCount": 1,
+  "childCompleted": true,
+  "resultEnteredParent": true,
+  "parentReportedVerifiedHash": true,
+  "artifactIndependentlyVerified": true,
+  "audio": "virtual; no physical playback claim",
+  "quickTimings": [
+    {
+      "model": "deepseek-flash",
+      "sameSession": true,
+      "firstTokenMs": 875,
+      "completeMs": 1112
+    },
+    {
+      "model": "deepseek-flash",
+      "sameSession": true,
+      "firstTokenMs": 563,
+      "completeMs": 756
+    }
+  ]
+}

@@ -3,8 +3,18 @@ export function visibleText(content) {
   return (Array.isArray(content) ? content : []).filter(item => item.type === 'text').map(item => item.text).join('\n');
 }
 
+/** The local bridge receives visible settlements, never native reasoning streams or replay state. */
+export function publicSessionEvent(event) {
+  if (event.type !== 'assistant/message') return event;
+  return { type: event.type, seq: event.seq, time: event.time, data: {
+    turn: event.data.turn, step: event.data.step,
+    message: { id: event.data.message.id, role: 'assistant',
+      content: event.data.message.content.filter(block => ['text', 'tool-call'].includes(block.type)) },
+  } };
+}
+
 export function traceState(state) {
-  return { sessionId: state.sessionId, status: state.status,
+  return { sessionId: state.sessionId, status: state.status, phase: state.phase, queue: state.queue,
     children: (state.children ?? []).map(child => ({ id: child.id, ended: child.ended,
       stopReason: child.stopReason, provider: child.provider })) };
 }
@@ -27,8 +37,10 @@ export function nativeTrace(record, parentSessionId) {
     nativeType: event.type, nativeEventSequence: event.seq };
   if (event.type === 'assistant/message') {
     const text = visibleText(data.message.content); if (!text) return null;
-    return { ...shared, kind: parent ? 'scheduler.reply' : 'child.reply',
-      title: parent ? '主调度器生成回复' : '子代理生成结果', text };
+    if (text.trim() === '无需补充') return null;
+    const quick = parent && record.data.phase === 'quick';
+    return { ...shared, messageId: data.message.id, kind: quick ? 'front.reply' : parent ? 'scheduler.reply' : 'child.reply',
+      title: quick ? '主调度快速回应（思考关闭）' : parent ? '主调度器生成回复' : '子代理生成结果', text };
   }
   if (event.type === 'tool/call') {
     let args; try { args = JSON.parse(data.arguments); } catch { args = data.arguments; }
@@ -41,7 +53,7 @@ export function nativeTrace(record, parentSessionId) {
       callId: data.message.toolCallId, text: visibleText(data.message.content),
       details: { isError: data.message.isError } };
   }
-  if (event.type === 'user/message' && data.source?.kind === 'agent-message') {
+  if (event.type === 'user/message' && ['agent-message', 'subagent-settled'].includes(data.source?.kind)) {
     return { ...shared, actor: '子代理 → 主调度器', kind: 'child.relay', title: '子代理消息已进入主调度上下文',
       childId: data.source.senderSessionId, text: visibleText(data.content), details: data.source };
   }
