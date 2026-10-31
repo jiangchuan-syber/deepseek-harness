@@ -32,7 +32,7 @@ let exited = false, port, sessionId, cursor = 0, polling = false, current = null
 const player = new PlaybackQueue({ charsPerSecond: 9 });
 const messages = [], metrics = [], turnEpochs = new Map();
 let nativeState = {}, lastError = '', configured = false, activeNativeTurn;
-function message(role, text) { messages.push({ role, text, at: Date.now() }); }
+function message(role, text, owner = current) { messages.push({ role, text, at: Date.now(), requestId: owner?.id }); }
 harness.on('exit', (code, signal) => { exited = true; lastError = `Harness stopped (${code ?? signal})`; });
 async function api(path, body) {
   const r = await fetch(`http://127.0.0.1:${port}${path}`, { method: body === undefined ? 'GET' : 'POST',
@@ -68,7 +68,7 @@ const poller = setInterval(async () => {
       const text = (event.data.message.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('');
       if (!text) continue;
       const owner = turnEpochs.get(activeNativeTurn);
-      message('调度器', text);
+      message('调度器', text, owner);
       if (owner) player.offer({ turnId: owner.id, role: 'answer', text, epoch: owner.epoch });
     }
     nativeState = await api('/state');
@@ -80,21 +80,22 @@ function interrupt() {
   message('打断', '虚拟播放已停止。下次发送将携带已播／未播回执；后台任务继续运行。');
   return pendingDelivery;
 }
-async function sendInput(text) {
+async function sendInput(text, id, deviceDelivery, source) {
   if (current && !pendingDelivery) interrupt();
-  const delivery = pendingDelivery; pendingDelivery = null;
-  const id = randomUUID(), epoch = player.begin(id);
+  // A real device must never inherit the virtual player's delivery estimate.
+  const delivery = source === 'esp32' ? deviceDelivery : pendingDelivery; pendingDelivery = null;
+  const epoch = player.begin(id);
   current = { id, epoch }; message('你', text);
   const start = performance.now();
   const front = quickReply({ key: process.env.DEEPSEEK_API_KEY, model, text, signal: AbortSignal.timeout(20000) })
     .then(result => { metrics.push({ firstTokenMs: result.firstTokenMs, completeMs: result.completeMs });
-      message('快速接话', result.text); player.offer({ turnId: id, role: 'intro', text: result.text, epoch }); })
-    .catch(error => { player.failIntro(id); message('错误', '接话模型：' + error.message); });
+      message('快速接话', result.text, { id }); player.offer({ turnId: id, role: 'intro', text: result.text, epoch }); })
+    .catch(error => { player.failIntro(id); message('错误', '接话模型：' + error.message, { id }); });
   const instructions = configured ? '' : `你是语音主调度器，最高优先级是响应用户。所有实际工作委派原生subagent子任务，自己不执行命令、不改文件。创建后立即简短回答，不调用wait_agents。子任务运行时继续响应用户，完成后主动报告真实结果。输出面向用户的简短中文。用户说停止或暂停任务时，调用原生subagent中断相应任务，并如实报告状态。工作目录是 ${fixture.replaceAll('\\', '/')}。样例任务可委派子任务用pwsh执行 node worker-task.mjs，它等待22秒后校验sample.txt，生成worker-result.json；不得修改此目录外文件。下方播放回执的已播放内容不等于用户已经理解。\n\n用户：`;
   configured = true;
   try { await api('/prompt', { requestId: id, text: instructions + text, delivery });
     metrics.push({ promptAcceptedMs: performance.now() - start }); }
-  catch (error) { message('错误', '调度器：' + error.message); }
+  catch (error) { message('错误', '调度器：' + error.message, { id }); }
   await front;
 }
 let busy = false;
@@ -120,16 +121,19 @@ const server = createServer(async (req, res) => {
       if (busy) return respond(409, { error: '上一条输入仍在接收，请稍后再发；可以随时打断播放。' });
       if (exited) return respond(503, { error: lastError });
       if (typeof input.text !== 'string' || !input.text.trim()) return respond(400, { error: '请输入内容' });
-      busy = true; void sendInput(input.text.trim()).catch(e => { lastError = e.message; }).finally(() => { busy = false; });
-      return respond(202, { accepted: true });
+      const requestId = randomUUID(), messageCursor = messages.length;
+      busy = true; void sendInput(input.text.trim(), requestId, input.delivery, input.source).catch(e => { lastError = e.message; }).finally(() => { busy = false; });
+      return respond(202, { accepted: true, requestId, messageCursor });
     }
     if (url.pathname === '/interrupt-child') return respond(202, await api('/interrupt-child', { childId: input.childId }));
     return respond(404, { error: 'Not found' });
   } catch (error) { if (!res.headersSent) respond(500, { error: error.message }); else res.destroy(); }
 });
-await new Promise(done => server.listen(0, '127.0.0.1', done));
+await new Promise(done => server.listen(Number(process.env.VOICE_LAB_PORT ?? 0), '127.0.0.1', done));
 const address = `http://127.0.0.1:${server.address().port}`;
 writeFileSync(join(runDir, 'interactive-ready.json'), JSON.stringify({ url: address, pid: process.pid, runDir }));
+if (process.env.VOICE_LAB_CLIENT_CONFIG) writeFileSync(process.env.VOICE_LAB_CLIENT_CONFIG,
+  JSON.stringify({ url: address, token: uiToken, runDir }));
 console.log(JSON.stringify({ url: address, runDir }));
 let stopping = false;
 async function shutdown() {
