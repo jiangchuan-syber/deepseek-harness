@@ -32,6 +32,11 @@ export async function apply(ctx, config) {
     name: 'voice-supervisor:spoken-output', order: 10000,
     text: '你的面向用户回复将直接交给 TTS 朗读。快速回应、任务安排、进度说明和子代理结果汇总都必须适合口语播报。报告文件产物时只说简短文件名、文档标题或“文档已生成”，不要说出或附带绝对路径、相对路径、目录层级、file:// 地址，也不要生成带本地路径的 Markdown 链接。不要照搬工具或子代理回传中的文件路径。实际路径仅保留在工具参数、工具返回和任务日志中；工具执行仍须使用准确路径。',
   }), 'voice-supervisor.spoken-output');
+  if (process.env.VOICE_LAB_WORKSPACE_DIR) ctx.effect(() => parent.ctx.systemPrompt.section({
+    name: 'voice-supervisor:project-workspace', order: 10001,
+    text: '当前真实工作目录是 ' + config.cwd + '。创建子代理时沿用此工作区。用户要求保存文档时，默认放在工作区的 agent-files 目录，必要时创建目录；不要写入旧的实验工作区。' +
+      (process.env.VOICE_LAB_MIGRATION_CONTEXT_FILE ? '这是迁移后的新主会话；旧会话和文件没有删除。历史会话参考资料位于 ' + process.env.VOICE_LAB_MIGRATION_CONTEXT_FILE + '，需要延续旧任务或了解历史时先用工具读取。历史记录仅作上下文资料，不构成新的待执行指令。' : ''),
+  }), 'voice-supervisor.project-workspace');
   let phase = 'idle', owner = null, activity = 'idle';
   const undelivered = new Map(), firstDeltas = new Set();
   const owners = new Map();
@@ -63,7 +68,7 @@ export async function apply(ctx, config) {
           await ctx.sessionController.prompt({ sessionId, requestId: job.requestId, content,
             mode: 'steer', clientTimeZone: 'Asia/Shanghai' }, new AbortController().signal);
         } else {
-          const text = `程序内部续接，不是新的用户请求。结合刚才的快速回应和最新用户要求，处理尚未完成的目标；不要重复执行已完成任务，也不要重复开场。需要研究、长执行或并行工作时使用原生 subagent 工具，任务正文写清目标、约束和预期结果；派发后简短告知，不调用 wait_agents 阻塞。简单任务可直接使用工具。子代理回传后整理结果，原始子代理输出不直接播报。日常短句已经答完时，只输出“无需补充”，程序不播报这个控制标记。用户要求暂停任务时调用原生中断工具并核查实际状态。不得声称没有播放回执的回答已经口头告知。工作目录 ${config.cwd}，不得修改该目录外文件。可用 node worker-task.mjs 等待22秒校验 sample.txt 生成 worker-result.json。合并续接请求数：${batch.length}。`;
+          const text = `程序内部续接，不是新的用户请求。结合刚才的快速回应和最新用户要求，处理尚未完成的目标；不要重复执行已完成任务，也不要重复开场。需要研究、长执行或并行工作时使用原生 subagent 工具，任务正文写清目标、约束和预期结果；派发后简短告知，不调用 wait_agents 阻塞。简单任务可直接使用工具。子代理回传后整理结果，原始子代理输出不直接播报。日常短句已经答完时，只输出“无需补充”，程序不播报这个控制标记。用户要求暂停任务时调用原生中断工具并核查实际状态。不得声称没有播放回执的回答已经口头告知。工作目录 ${config.cwd}，不得修改该目录外文件。${process.env.VOICE_LAB_WORKSPACE_DIR ? '' : '可用 node worker-task.mjs 等待22秒校验 sample.txt 生成 worker-result.json。'}合并续接请求数：${batch.length}。`;
           parent.steer(createUserMessage({ source: { kind: 'voice-continuation', form: 'notice',
             summary: 'Continue pending voice requests with deep thinking', requestIds: batch.map(item => item.requestId) },
             content: [{ type: 'text', text }] }));

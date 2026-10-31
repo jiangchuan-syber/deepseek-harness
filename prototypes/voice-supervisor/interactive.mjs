@@ -13,10 +13,12 @@ const repo = resolve(here, '../..');
 if (!process.env.DEEPSEEK_API_KEY) throw new Error('DEEPSEEK_API_KEY required');
 const model = process.env.VOICE_MODEL ?? 'deepseek-flash';
 const runDir = process.env.VOICE_LAB_RESUME_DIR ?? join(here, '.runs', 'interactive-' + new Date().toISOString().replaceAll(':', '-'));
-const fixture = join(runDir, 'workspace');
+const fixture = process.env.VOICE_LAB_WORKSPACE_DIR ? resolve(process.env.VOICE_LAB_WORKSPACE_DIR) : join(runDir, 'workspace');
 mkdirSync(fixture, { recursive: true });
-if (!existsSync(join(fixture, 'sample.txt'))) writeFileSync(join(fixture, 'sample.txt'), 'voice-supervisor-reusable-fixture\n');
-if (!existsSync(join(fixture, 'worker-task.mjs'))) writeFileSync(join(fixture, 'worker-task.mjs'), "import{readFileSync,writeFileSync}from'node:fs';import{createHash}from'node:crypto';import{setTimeout as wait}from'node:timers/promises';await wait(22000);const b=readFileSync('sample.txt');const r={sha256:createHash('sha256').update(b).digest('hex'),bytes:b.length};writeFileSync('worker-result.json',JSON.stringify(r));console.log(JSON.stringify(r));\n");
+if (!process.env.VOICE_LAB_WORKSPACE_DIR) {
+  if (!existsSync(join(fixture, 'sample.txt'))) writeFileSync(join(fixture, 'sample.txt'), 'voice-supervisor-reusable-fixture\n');
+  if (!existsSync(join(fixture, 'worker-task.mjs'))) writeFileSync(join(fixture, 'worker-task.mjs'), "import{readFileSync,writeFileSync}from'node:fs';import{createHash}from'node:crypto';import{setTimeout as wait}from'node:timers/promises';await wait(22000);const b=readFileSync('sample.txt');const r={sha256:createHash('sha256').update(b).digest('hex'),bytes:b.length};writeFileSync('worker-result.json',JSON.stringify(r));console.log(JSON.stringify(r));\n");
+}
 const token = randomUUID(), uiToken = randomUUID(), readyFile = join(runDir, 'ready-' + randomUUID() + '.json');
 const env = { ...process.env, DSH_HOME: join(runDir, 'home'), DSH_PERMISSION_MODE: 'danger-full-access',
   DEEPSEEK_BASE_URL: 'https://api.deepseek.com/anthropic', DSH_TELEMETRY_MODE: 'DISABLED', VOICE_MODEL: model,
@@ -57,6 +59,7 @@ while (!existsSync(readyFile)) {
   await delay(100);
 }
 ({ port, sessionId } = JSON.parse(readFileSync(readyFile, 'utf8')));
+writeFileSync(join(runDir, 'runtime-session.local.json'), JSON.stringify({ sessionId, workspace: fixture }));
 let lastTick = performance.now();
 const timer = setInterval(() => { const now = performance.now(); player.advance(now - lastTick); lastTick = now; }, 25);
 const poller = setInterval(async () => {
