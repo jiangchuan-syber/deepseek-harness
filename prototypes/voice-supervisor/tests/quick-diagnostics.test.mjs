@@ -15,7 +15,10 @@ async function fixture(t, stream, timeoutMs = 500) {
     assert.ok(basename(dir).startsWith('voice-quick-diagnostics-'));
     await rm(dir, { recursive: true, force: true });
   });
-  const parent = { id: 'test-parent', session: { snapshotEvents: () => [] }, cancel() {} };
+  const selections = [], turns = [], sessionEvents = [];
+  const parent = { id: 'test-parent', status: 'idle', session: { snapshotEvents: () => sessionEvents }, cancel() {},
+    model: { select: selection => selections.push({ ...selection }) }, whenIdle: async () => {},
+    steer(message) { turns.push(message); sessionEvents.push({ type: 'turn/end', data: { reason: { kind: 'completed' } } }); } };
   const ctx = {
     workspaceRegistry: { create: async () => ({ id: 'test-workspace' }) },
     sessionController: { create: async () => ({ sessionId: parent.id }), resolveAgent: async () => ({ agent: parent }) },
@@ -24,9 +27,17 @@ async function fixture(t, stream, timeoutMs = 500) {
   };
   const token = 'synthetic-test-token';
   const readyFile = join(dir, 'ready.json');
-  await apply(ctx, { token, readyFile, cwd: dir,
+  await apply(ctx, { token, readyFile, cwd: dir, supervisorReasoningEffort: 'max',
     quick: { contextChars: 1200, inputChars: 600, maxTokens: 64, maxChars: 30, timeoutMs, capacity: 4 } });
   const { port } = JSON.parse(await readFile(readyFile, 'utf8'));
+  const api = async (path, input) => {
+    const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+      method: input === undefined ? 'GET' : 'POST', headers: { authorization: `Bearer ${token}` },
+      body: input === undefined ? undefined : JSON.stringify(input),
+    });
+    assert.ok(response.ok, 'Local fixture API failed: ' + response.status);
+    return response.json();
+  };
   const response = await fetch(`http://127.0.0.1:${port}/quick-probe`, {
     method: 'POST', headers: { authorization: `Bearer ${token}` }, body: '{}',
   });
@@ -34,8 +45,32 @@ async function fixture(t, stream, timeoutMs = 500) {
   const rows = (await readFile(join(dir, 'quick-requests.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
   const diagnostics = rows.filter(row => row.kind === 'quick.diagnostics');
   assert.equal(diagnostics.length, 1);
-  return { status: response.status, body, diagnostic: diagnostics[0] };
+  return { status: response.status, body, diagnostic: diagnostics[0], api, selections, turns };
 }
+
+test('native parent keeps max across startup and continuation while quick requests stay off', async t => {
+  const quickEfforts = [];
+  const result = await fixture(t, async function* (request) {
+    quickEfforts.push(request.reasoningEffort);
+    yield { type: 'text-delta', text: '收到。' };
+    yield { type: 'finish', reason: { kind: 'stop' } };
+  });
+  assert.deepEqual(result.selections.map(selection => selection.reasoningEffort), ['max']);
+  await result.api('/prompt', { requestId: 'max-continuation-test', text: '检查本次设置。' });
+  const deadline = performance.now() + 2000;
+  while ((await result.api('/state')).queue.readyContinuations !== 1) {
+    assert.ok(performance.now() < deadline, 'Quick handoff exceeded fixture deadline');
+    await delay(5);
+  }
+  await result.api('/continue', { requestId: 'max-continuation-test' });
+  while ((await result.api('/state')).queue.phase !== 'idle') {
+    assert.ok(performance.now() < deadline, 'Native continuation exceeded fixture deadline');
+    await delay(5);
+  }
+  assert.equal(result.turns.length, 1);
+  assert.deepEqual(result.selections.map(selection => selection.reasoningEffort), ['max', 'max', 'max']);
+  assert.deepEqual(quickEfforts, ['off', 'off']);
+});
 
 function waitForAbort(signal) {
   if (signal.aborted) return Promise.resolve();

@@ -12,6 +12,7 @@ export const name = 'voice-supervisor-lab';
 export const inject = ['sessionController', 'agents', 'workspaceRegistry', 'subagents', 'tools', 'systemPrompt', 'llm'];
 export async function apply(ctx, config) {
   if (!config.token || !config.readyFile || !config.cwd) throw new Error('token, readyFile, cwd required');
+  if (!['low', 'high', 'max'].includes(config.supervisorReasoningEffort)) throw new Error('Invalid supervisorReasoningEffort');
   const limits = config.quick;
   for (const key of ['contextChars', 'inputChars', 'maxTokens', 'maxChars', 'timeoutMs', 'capacity']) {
     if (!Number.isSafeInteger(limits?.[key]) || limits[key] < 1) throw new Error('Invalid quick config: ' + key);
@@ -34,6 +35,8 @@ export async function apply(ctx, config) {
   };
   const parent = ctx.agents.get(sessionId);
   if (!parent) throw new Error('Native parent was not created');
+  parent.model.select({ provider: 'deepseek-official', model: process.env.VOICE_MODEL,
+    reasoningEffort: config.supervisorReasoningEffort });
   ctx.effect(() => parent.ctx.systemPrompt.section({
     name: 'voice-supervisor:spoken-output', order: 10000,
     text: '你的面向用户回复将直接交给 TTS 朗读。快速回应、任务安排、进度说明和子代理结果汇总都必须适合口语播报。报告文件产物时只说简短文件名、文档标题或“文档已生成”，不要说出或附带绝对路径、相对路径、目录层级、file:// 地址，也不要生成带本地路径的 Markdown 链接。不要照搬工具或子代理回传中的文件路径。实际路径仅保留在工具参数、工具返回和任务日志中；工具执行仍须使用准确路径。',
@@ -71,7 +74,7 @@ export async function apply(ctx, config) {
       await parent.whenIdle();
       phase = nextPhase; owner = job;
       parent.model.select({ provider: 'deepseek-official', model: process.env.VOICE_MODEL,
-        reasoningEffort: phase === 'quick' ? 'off' : 'high' });
+        reasoningEffort: phase === 'quick' ? 'off' : config.supervisorReasoningEffort });
       const before = parent.session.snapshotEvents().length;
       const restore = phase === 'quick' ? parent.ctx.tools.restrict({ allow: [] }) : () => {};
       record('phase', { phase, owner, thinking: phase === 'quick' ? 'disabled' : 'enabled' });
@@ -89,7 +92,8 @@ export async function apply(ctx, config) {
         if (!end || end.data.reason.kind !== 'completed') throw new Error('Native phase did not complete: ' + (end?.data.reason.error?.message ?? end?.data.reason.kind ?? 'no turn'));
       } finally {
         restore(); phase = 'idle'; owner = null;
-        parent.model.select({ provider: 'deepseek-official', model: process.env.VOICE_MODEL, reasoningEffort: 'high' });
+        parent.model.select({ provider: 'deepseek-official', model: process.env.VOICE_MODEL,
+          reasoningEffort: config.supervisorReasoningEffort });
       }
     },
   });

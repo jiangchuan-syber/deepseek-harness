@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-This opt-in prototype acknowledges input through an independent bounded request with thinking off, while a persistent Harness parent uses high reasoning effort to delegate native child work and return results through an interruptible speech queue. It does not replace the installed desktop application.
+This opt-in prototype acknowledges input through an independent bounded request with thinking off, while a persistent Harness parent uses max reasoning effort to delegate native child work and return results through an interruptible speech queue. It does not replace the installed desktop application.
 
 ## Documents
 
@@ -14,7 +14,7 @@ The local runtime exposes authenticated `/health/live` and `/health/ready` endpo
 
 ## Run
 
-Requires Node >=24.9, the repository's pinned pnpm, and `DEEPSEEK_API_KEY` in the launch environment. `VOICE_MODEL` defaults to `deepseek-flash`. The interactive runner uses an independent tool-free `off` request for acknowledgements and the persistent native parent with `high` for execution decisions; native children inherit compatible parent model and effort settings unless overridden.
+Requires Node >=24.9, the repository's pinned pnpm, and `DEEPSEEK_API_KEY` in the launch environment. `VOICE_MODEL` defaults to `deepseek-flash`. The interactive runner uses an independent tool-free `off` request for acknowledgements and the persistent native parent with `max` for execution decisions; native children inherit compatible parent model and effort settings unless overridden.
 
 From the repository root:
 
@@ -40,7 +40,7 @@ The interface binds to `127.0.0.1` and authenticates API requests with a local t
 
 Input admission returns HTTP 202 and a request ID. The quick lane runs independently of native deep work. Each quick request uses its own short system, at most 1200 recent conversation characters and 600 latest-input characters, effort `off`, no tool declarations or executor, and 64 output tokens. It stops at one sentence or 30 Unicode characters. These limits are configurable in `overlay.yml`. The runner forwards the quick speech events before acknowledging `/continue`; only then does the native phase queue receive the original untruncated input, acknowledgement and playback receipt. It may merge pending continuations. Failed admission is visible and does not report execution as started.
 
-The native parent uses `high`; quick calls do not change its model selection. Model events expose request timing and first-delta categories. The authenticated `/speech-events` SSE additionally forwards visible parent text deltas, generation IDs and message settlements; private reasoning and tool arguments are not forwarded. Both explicit agent messages and automatic settlement notices establish child-result receipt. Child output is summarized by the parent before speech.
+The native parent uses the overlay's `supervisorReasoningEffort: max` on startup and between execution stages; quick calls do not change its model selection. Model events expose request timing and first-delta categories. The authenticated `/speech-events` SSE additionally forwards visible parent text deltas, generation IDs and message settlements; private reasoning and tool arguments are not forwarded. Both explicit agent messages and automatic settlement notices establish child-result receipt. Child output is summarized by the parent before speech.
 
 Quick request inputs and responses are recorded in the private `quick-requests.jsonl`; they do not enter the main request history until the deep continuation. Phase events and admissions are appended to a local queue journal. Generated speech is appended to an outbox. Pending native messages are supplied as unconfirmed delivery context on later inputs. Only all real-device pieces acknowledged as completed settle a native message; virtual playback does not confirm real-device delivery. Unfinished requests are not automatically replayed after restart.
 

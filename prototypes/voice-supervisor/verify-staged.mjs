@@ -42,7 +42,7 @@ const sessions = walk(join(config.runDir, 'home/sessions')).map(path => {
 const parent = sessions.find(events => !events[0].parentSession);
 const headers = parent.filter(e => e.type === 'request/header');
 const quick = readFileSync(join(config.runDir, 'quick-requests.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line)).filter(e => e.kind === 'quick.request');
-const deep = headers.filter(e => e.data.header.config.reasoningEffort === 'high');
+const deep = headers.filter(e => e.data.header.config.reasoningEffort === 'max');
 assert.equal(quick.length, 2); assert.ok(quick.every(e => !e.request.tools?.length && e.request.reasoningEffort === 'off' && e.request.maxTokens === 64)); assert.ok(deep.length > 0);
 assert.equal(headers.filter(e => e.data.header.config.reasoningEffort === 'off').length, 0);
 const continuations = parent.filter(e => e.type === 'user/message' && e.data.source?.kind === 'voice-continuation');
