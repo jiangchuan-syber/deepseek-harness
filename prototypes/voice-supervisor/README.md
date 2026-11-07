@@ -2,9 +2,11 @@
 
 English | [中文](README.zh.md)
 
-This opt-in prototype lets one persistent Harness parent acknowledge input with thinking off, continue with high reasoning effort, delegate native child work, and return results through an interruptible speech queue. It does not replace the installed desktop application.
+This opt-in prototype acknowledges input through an independent bounded request with thinking off, while a persistent Harness parent uses high reasoning effort to delegate native child work and return results through an interruptible speech queue. It does not replace the installed desktop application.
 
 ## Documents
+
+The local runtime exposes authenticated `/health/live` and `/health/ready` endpoints. Readiness requires recent native polling; a dead child or prolonged polling failure makes liveness fail. SSE publishes an immediate connection comment and closes when the native process exits. Diagnostic output rotates independently of durable Session logs. Windows deployment and owned-process recovery are managed by the enclosing project's `server/service_manager.py`, not by this optional prototype.
 
 - [Product requirements](docs/PRD.zh.md)
 - [Development and acceptance plan](docs/PLAN.zh.md)
@@ -12,7 +14,7 @@ This opt-in prototype lets one persistent Harness parent acknowledge input with 
 
 ## Run
 
-Requires Node >=24.9, the repository's pinned pnpm, and `DEEPSEEK_API_KEY` in the launch environment. `VOICE_MODEL` defaults to `deepseek-flash`. The interactive runner uses the same native parent with effort `off` for acknowledgements and `high` for execution decisions; native children use the provider defaults.
+Requires Node >=24.9, the repository's pinned pnpm, and `DEEPSEEK_API_KEY` in the launch environment. `VOICE_MODEL` defaults to `deepseek-flash`. The interactive runner uses an independent tool-free `off` request for acknowledgements and the persistent native parent with `high` for execution decisions; native children inherit compatible parent model and effort settings unless overridden.
 
 From the repository root:
 
@@ -28,7 +30,7 @@ The runner creates an isolated home and fixture workspace under `.runs/`, launch
 
 ## Manual test page
 
-Keep the printed page open. Submit the sample task, interrupt virtual playback, and send a follow-up while the parent is thinking or a child is running. Acknowledgements and decision requests belong to the same durable native session. The page accepts text as simulated ASR input; playback uses a virtual character clock and produces no sound.
+Keep the printed page open. Submit the sample task, interrupt virtual playback, and send a follow-up while the parent is thinking or a child is running. Acknowledgements use a bounded request journal; execution decisions belong to the persistent native session. The page accepts text as simulated ASR input; playback uses a virtual character clock and produces no sound.
 
 The ESP32 bridge separately supplies real ASR, TTS, PCM transport, and whole-chunk device receipts. Its four-module workbench displays the quick stage, deep processing, queued input, native tool traffic, child settlement, and actual playback evidence. Speech and model work can progress concurrently.
 
@@ -36,16 +38,16 @@ The interface binds to `127.0.0.1` and authenticates API requests with a local t
 
 ## Integration behavior
 
-Input admission returns HTTP 202 and a request ID. The phase queue serializes the native parent, prioritizes queued user acknowledgements, and merges pending deep continuations against the latest conversation. User text enters the native session once; an internal application continuation message continues processing without repeating that user request. The quick stage restricts tools and denies execution; decision requests restore tools and start a new request series so the upstream declaration list has a nondeferred baseline.
+Input admission returns HTTP 202 and a request ID. The quick lane runs independently of native deep work. Each quick request uses its own short system, at most 1200 recent conversation characters and 600 latest-input characters, effort `off`, no tool declarations or executor, and 64 output tokens. It stops at one sentence or 30 Unicode characters. These limits are configurable in `overlay.yml`. The runner forwards the quick speech events before acknowledging `/continue`; only then does the native phase queue receive the original untruncated input, acknowledgement and playback receipt. It may merge pending continuations. Failed admission is visible and does not report execution as started.
 
-The parent switches between `off` and `high` before native requests. Model events expose request timing and the category of the first reasoning, text, or tool delta; private reasoning text is not forwarded. Both explicit agent messages and automatic settlement notices establish child-result receipt. Child output is summarized by the parent before speech.
+The native parent uses `high`; quick calls do not change its model selection. Model events expose request timing and first-delta categories. The authenticated `/speech-events` SSE additionally forwards visible parent text deltas, generation IDs and message settlements; private reasoning and tool arguments are not forwarded. Both explicit agent messages and automatic settlement notices establish child-result receipt. Child output is summarized by the parent before speech.
 
-Phase events and admissions are appended to a local queue journal. Generated speech is appended to an outbox. Pending native messages are supplied as unconfirmed delivery context on later inputs. Only all real-device pieces acknowledged as completed settle a native message; virtual playback does not confirm real-device delivery. Unfinished requests are not automatically replayed after restart.
+Quick request inputs and responses are recorded in the private `quick-requests.jsonl`; they do not enter the main request history until the deep continuation. Phase events and admissions are appended to a local queue journal. Generated speech is appended to an outbox. Pending native messages are supplied as unconfirmed delivery context on later inputs. Only all real-device pieces acknowledged as completed settle a native message; virtual playback does not confirm real-device delivery. Unfinished requests are not automatically replayed after restart.
 
-For real staged acceptance, run `node --import tsx/esm prototypes/voice-supervisor/verify-staged.mjs PRIVATE_CONFIG_PATH` against a fresh isolated runner using its local client-config file. The check refuses an existing conversation, submits two synthetic inputs, verifies native off/high headers and actual reasoning, and independently checks the worker artifact. It leaves the dedicated runner open for inspection.
+The authenticated POST `/quick-probe` measures the same quick call with a fixed synthetic 1200-character history; it does not speak, dispatch work, or update conversational memory. Its TTFT uses a monotonic clock around the application model stream, not a provider-only inference timer. `verify-staged.mjs` requires a fresh isolated runner and checks quick request journals, native deep headers, child completion and the independently verified worker artifact. It must not run against a retained user session.
 
 ## Limitations
 
-The parent does not answer immediately during an already-running deep request; new input is visibly queued. Long execution should use children. Speech is released on completed native messages; subsequent deep responses do not stream sentence by sentence while tool arguments are still being generated. The old `run-live.mjs` exercises the earlier independent-front scenario and is not the staged runner's acceptance command.
+Quick replies can run during deep work; new deep decisions still wait for the serialized native parent. Long execution should use children. The v2 Python bridge commits visible text incrementally to one Qwen PCM task per utterance. It requires matching v2 device firmware; the legacy device path still consumes completed messages. Only device consumption confirmation settles delivery. The old `run-live.mjs` exercises the earlier independent-front scenario and is not the staged runner's acceptance command.
 
-Queue journals retain evidence but do not provide crash-safe task replay or autonomous delivery after an empty recording. Undelivered older output is supplied for the parent's review rather than replayed automatically. The firmware has no interrupted-chunk sample cursor. Prompt directory constraints are not an operating-system sandbox; context capacity and compaction remain native Harness behavior.
+Queue journals retain evidence but do not provide crash-safe task replay or autonomous delivery after an empty recording. Undelivered older output is supplied for the parent's review rather than replayed automatically. Firmware v2 reports conservative consumed-sample cursors; word alignment is unavailable. Prompt directory constraints are not an operating-system sandbox; context capacity and compaction remain native Harness behavior.
