@@ -23,12 +23,12 @@ const deadline = Date.now() + 300000;
 let state, second = false, sawThinking = false, sawQueued = false, settled = false;
 while (Date.now() < deadline) {
   state = await api('/state'); const native = state.nativeState;
-  sawThinking ||= native.phase === 'thinking'; sawQueued ||= (native.queue?.queuedInputs ?? 0) > 0;
+  sawThinking ||= native.phase === 'thinking'; sawQueued ||= (native.queue?.quickPending ?? 0) > 0 || native.queue?.quickRunning === true;
   if (!second && native.phase === 'thinking') {
     await api('/send', { text: '后台校验继续，不要重新安排第二个任务。请简短确认这个补充。', voiceSessionId: 'staged-check-b' }); second = true;
   }
   if (native.status === 'idle' && native.queue?.phase === 'idle' && !native.queue?.queuedInputs
-    && !native.queue?.pendingContinuations && native.children.length && native.children.every(c => c.ended)) { settled = true; break; }
+    && !native.queue?.pendingContinuations && !native.queue?.quickRunning && !native.queue?.readyContinuations && native.children.length && native.children.every(c => c.ended)) { settled = true; break; }
   await delay(250);
 }
 assert.ok(settled, 'Native staged flow exceeded deadline');
@@ -41,11 +41,12 @@ const sessions = walk(join(config.runDir, 'home/sessions')).map(path => {
 });
 const parent = sessions.find(events => !events[0].parentSession);
 const headers = parent.filter(e => e.type === 'request/header');
-const quick = headers.filter(e => e.data.header.config.reasoningEffort === 'off');
+const quick = readFileSync(join(config.runDir, 'quick-requests.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line)).filter(e => e.kind === 'quick.request');
 const deep = headers.filter(e => e.data.header.config.reasoningEffort === 'high');
-assert.equal(quick.length, 2); assert.ok(quick.every(e => !e.data.header.tools?.length)); assert.ok(deep.length > 0);
-assert.equal(parent.filter(e => e.type === 'user/message' && e.data.source?.rpcId).length, 2);
+assert.equal(quick.length, 2); assert.ok(quick.every(e => !e.request.tools?.length && e.request.reasoningEffort === 'off' && e.request.maxTokens === 64)); assert.ok(deep.length > 0);
+assert.equal(headers.filter(e => e.data.header.config.reasoningEffort === 'off').length, 0);
 const continuations = parent.filter(e => e.type === 'user/message' && e.data.source?.kind === 'voice-continuation');
+assert.equal(new Set(continuations.flatMap(e => e.data.source.requestIds)).size, 2);
 assert.ok(continuations.length > 0 && continuations.every(e => e.data.content.some(c => c.text?.includes('程序内部续接'))));
 assert.ok(parent.some(e => e.type === 'assistant/message' && e.data.stream?.some(r => r.type === 'reasoning-chunks')));
 assert.ok(sawThinking && sawQueued);

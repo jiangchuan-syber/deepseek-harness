@@ -15,3 +15,10 @@
         token: !!js process.env.VOICE_LAB_TOKEN
         readyFile: !!js process.env.VOICE_LAB_READY_FILE
         cwd: !!js process.env.VOICE_LAB_CWD
+        quick:
+          contextChars: 1200
+          inputChars: 600
+          maxTokens: 64
+          maxChars: 30
+          timeoutMs: 15000
+          capacity: 32

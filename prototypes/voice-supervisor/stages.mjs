@@ -10,15 +10,19 @@ export class StageQueue {
       queuedInputs: this.inputs.length, pendingContinuations: this.continuations.length, lastError: this.lastError };
   }
   publish(kind, job, extra = {}) { this.observe({ kind, job, ...this.snapshot(), ...extra }); }
-  enqueue(job) {
+  enqueue(job, { quickDone = false } = {}) {
     if (this.closed) throw new Error('Stage queue closed');
     if (this.seen.has(job.requestId)) throw new Error('Duplicate request');
-    if (this.inputs.length >= 32) throw new Error('Input queue full');
+    if (this.inputs.length + this.continuations.length >= 32) throw new Error('Input queue full');
     this.publish('input.queued', job, { queuedInputs: this.inputs.length + 1 });
-    this.seen.add(job.requestId); this.inputs.push(job);
+    this.seen.add(job.requestId);
+    (quickDone ? this.continuations : this.inputs).push(job);
+    this.start();
+  }
+  start() {
     if (!this.running) this.running = this.drain().catch(error => {
       this.lastError = error.message; this.closed = true; this.current = null;
-    }).finally(() => { this.running = null; });
+    }).finally(() => { this.running = null; if (!this.closed && (this.inputs.length || this.continuations.length)) this.start(); });
   }
   async drain() {
     while (!this.closed && (this.inputs.length || this.continuations.length)) {

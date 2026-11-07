@@ -1,16 +1,22 @@
 import { createServer } from 'node:http';
-import { timingSafeEqual } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { writeFileSync, appendFileSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { StageQueue } from './stages.mjs';
+import { QuickLane, quickInput, shortReply } from './quick.mjs';
 import { publicSessionEvent } from './trace.mjs';
 
 /** Opt-in local experiment. Mount through a dsh profile; no installed source is modified. */
 export const name = 'voice-supervisor-lab';
-export const inject = ['sessionController', 'agents', 'workspaceRegistry', 'subagents', 'tools', 'systemPrompt'];
+export const inject = ['sessionController', 'agents', 'workspaceRegistry', 'subagents', 'tools', 'systemPrompt', 'llm'];
 export async function apply(ctx, config) {
   if (!config.token || !config.readyFile || !config.cwd) throw new Error('token, readyFile, cwd required');
+  const limits = config.quick;
+  for (const key of ['contextChars', 'inputChars', 'maxTokens', 'maxChars', 'timeoutMs', 'capacity']) {
+    if (!Number.isSafeInteger(limits?.[key]) || limits[key] < 1) throw new Error('Invalid quick config: ' + key);
+  }
+  if (limits.maxChars < 2) throw new Error('quick.maxChars must be at least 2');
   const workspace = await ctx.workspaceRegistry.create(config.cwd, 'Voice supervisor isolated lab');
   let sessionId;
   if (process.env.VOICE_LAB_SESSION_ID) {
@@ -47,6 +53,14 @@ export async function apply(ctx, config) {
   }
   const recovered = existsSync(journal) ? readFileSync(journal, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : [];
   for (const fact of recovered) if (fact.kind === 'delivery.completed') for (const id of fact.completedMessageIds) undelivered.delete(id);
+  const recent = [];
+  const remember = (role, text) => { recent.push({ role, text: Array.from(text).slice(-limits.contextChars).join('') });
+    while (recent.length > 32) recent.shift(); };
+  const outboxFile = join(dirname(config.readyFile), 'speech-outbox.jsonl');
+  if (existsSync(outboxFile)) for (const line of readFileSync(outboxFile, 'utf8').trim().split('\n').filter(Boolean).slice(-32)) {
+    const item = JSON.parse(line);
+    if (['你', '快速接话', '调度器'].includes(item.role)) remember(item.role === '你' ? '用户' : '助手', item.text);
+  }
   const stages = new StageQueue({
     observe: change => {
       appendFileSync(journal, JSON.stringify({ at: Date.now(), ...change }) + '\n');
@@ -62,16 +76,13 @@ export async function apply(ctx, config) {
       const restore = phase === 'quick' ? parent.ctx.tools.restrict({ allow: [] }) : () => {};
       record('phase', { phase, owner, thinking: phase === 'quick' ? 'disabled' : 'enabled' });
       try {
-        if (phase === 'quick') {
-          const content = [{ type: 'text', text: '你是持续对话的语音主调度器。当前是快速回应阶段，思考已关闭，工具不可用。结合真实对话上下文，对下面用户话语自然回应一句，通常不超过30字；简单闲聊可直接回答，需要执行的请求只说明你理解的方向。不要使用固定确认套话，不要声称尚未执行的任务已启动或完成。后端稍后会在同一上下文触发深度处理，不要向用户索要继续许可。\n用户本轮原话：\n' + job.text }];
-          content.unshift({ type: 'text', text: '实际播放送达记录；未获确认的内容不能说用户已听到。下列内容已经生成但未获完整播放确认，请结合新要求处理，不机械重播：\n' + JSON.stringify({ receipt: job.delivery, pending: [...undelivered.values()].map(item => ({ id: item.id, text: item.text.slice(0, 4000) })).slice(-8) }) });
-          await ctx.sessionController.prompt({ sessionId, requestId: job.requestId, content,
-            mode: 'steer', clientTimeZone: 'Asia/Shanghai' }, new AbortController().signal);
-        } else {
-          const text = `程序内部续接，不是新的用户请求。结合刚才的快速回应和最新用户要求，处理尚未完成的目标；不要重复执行已完成任务，也不要重复开场。需要研究、长执行或并行工作时使用原生 subagent 工具，任务正文写清目标、约束和预期结果；派发后简短告知，不调用 wait_agents 阻塞。简单任务可直接使用工具。子代理回传后整理结果，原始子代理输出不直接播报。日常短句已经答完时，只输出“无需补充”，程序不播报这个控制标记。用户要求暂停任务时调用原生中断工具并核查实际状态。不得声称没有播放回执的回答已经口头告知。工作目录 ${config.cwd}，不得修改该目录外文件。${process.env.VOICE_LAB_WORKSPACE_DIR ? '' : '可用 node worker-task.mjs 等待22秒校验 sample.txt 生成 worker-result.json。'}合并续接请求数：${batch.length}。`;
+        if (phase === 'quick') throw new Error('Quick replies use the independent lane');
+        else {
+          const text = `程序内部续接，不是新的用户请求。结合刚才的快速回应和最新用户要求，处理尚未完成的目标；不要重复执行已完成任务。快速接话已经完成了开口，深度回复禁止任何开场、确认或复述（“收到”“好的”“我这就”“刚才你说”这类都不要），直接给内容或直接开始执行。保留正常工具能力并遵守权限检查。优先把可独立执行的研究、实现、文件处理和测试交给原生 subagent，你负责协调和结果检查；不要为增加调用次数而拆碎简单动作，不重复派发。使用子代理时，任务正文写清目标、约束和预期结果；派发后简短告知，不调用 wait_agents 阻塞。简单任务可直接使用工具。子代理回传后整理结果，原始子代理输出不直接播报。日常短句已经答完时，只输出“无需补充”，程序不播报这个控制标记。用户要求暂停任务时调用原生中断工具并核查实际状态。不得声称没有播放回执的回答已经口头告知。工作目录 ${config.cwd}，不得修改该目录外文件。${process.env.VOICE_LAB_WORKSPACE_DIR ? '' : '可用 node worker-task.mjs 等待22秒校验 sample.txt 生成 worker-result.json。'}合并续接请求数：${batch.length}。`;
+          const inputs = batch.map(item => ({ input: item.text, quickReply: item.quickReply, delivery: item.delivery }));
           parent.steer(createUserMessage({ source: { kind: 'voice-continuation', form: 'notice',
             summary: 'Continue pending voice requests with deep thinking', requestIds: batch.map(item => item.requestId) },
-            content: [{ type: 'text', text }] }));
+            content: [{ type: 'text', text: text + '\n本轮用户输入与快速回应（快速回应不代表已播放）：\n' + JSON.stringify(inputs) }] }));
         }
         await parent.whenIdle();
         const end = parent.session.snapshotEvents().slice(before).filter(e => e.type === 'turn/end').at(-1);
@@ -83,6 +94,129 @@ export async function apply(ctx, config) {
     },
   });
   for (const fact of recovered) if (fact.kind === 'input.queued') stages.seen.add(fact.job.requestId);
+  const quickJournal = join(dirname(config.readyFile), 'quick-requests.jsonl');
+  const runQuick = async (job, controller, probe = false) => {
+      const emit = probe ? () => {} : record;
+      const preparedAt = performance.now();
+      const input = quickInput(probe ? [{ role: '用户', text: '你好。'.repeat(400) }] : recent, job.text, limits);
+      const attemptId = 'quick-' + randomUUID();
+      const request = { provider: 'deepseek-official', model: process.env.VOICE_MODEL,
+        reasoningEffort: 'off', maxTokens: limits.maxTokens, system: input.system,
+        messages: input.messages, stop: ['\n', '<｜', '<|'], signal: controller.signal };
+      appendFileSync(quickJournal, JSON.stringify({ at: Date.now(), kind: 'quick.request', requestId: job.requestId,
+        attemptId, request: { ...request, signal: undefined } }) + '\n');
+      const started = performance.now(), acceptedToStartMs = Date.now() - job.acceptedAt;
+      emit('model.started', { owner: job, phase: 'quick', lane: 'quick', attemptId, reasoningEffort: 'off',
+        preparationMs: started - preparedAt, acceptedToStartMs,
+        historyChars: input.historyChars, inputChars: input.inputChars, systemChars: Array.from(input.system).length,
+        maxTokens: limits.maxTokens, toolCount: 0 });
+      let text = '', first = false, completed = false, firstTextMs;
+      // Metadata only: never copy chunks, error messages, stacks or request bodies.
+      const code = value => typeof value === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/u.test(value) ? value : null;
+      const errorFacts = error => ({
+        type: typeof error?.name === 'string' && /^[A-Za-z][A-Za-z0-9]{0,47}$/u.test(error.name) ? error.name : 'unknown',
+        code: code(error?.code), causeType: typeof error?.cause?.name === 'string'
+          && /^[A-Za-z][A-Za-z0-9]{0,47}$/u.test(error.cause.name) ? error.cause.name : null,
+        causeCode: code(error?.cause?.code),
+      });
+      let receivedTextChars = 0, nonWhitespaceCharacterCount = 0, textDeltaCount = 0;
+      let lastTextAt, firstNonWhitespaceTextMs = null, finishReceived = false, finishReason = null, finishFailure = null;
+      let timeoutFiredAtMs = null, streamExit = 'pending', requestError = null, partialTextFallback = false;
+      let streamCloseStartedMs = null, streamCloseMs = null, streamCloseError = null;
+      const timeout = setTimeout(() => { timeoutFiredAtMs = performance.now() - started; controller.abort(); }, limits.timeoutMs);
+      try {
+      try {
+        const iterator = ctx.llm.stream(request)[Symbol.asyncIterator]();
+        const observed = {
+          [Symbol.asyncIterator]() { return this; },
+          next: (...args) => iterator.next(...args),
+          async return(...args) {
+            if (!iterator.return) return { done: true };
+            const closingAt = performance.now(); streamCloseStartedMs = closingAt - started;
+            try { return await iterator.return(...args); }
+            catch (error) { streamCloseError = errorFacts(error); throw error; }
+            finally { streamCloseMs = performance.now() - closingAt; }
+          },
+        };
+        for await (const chunk of observed) {
+          if (chunk.type === 'finish') {
+            finishReceived = true;
+            finishReason = ['stop', 'tool-calls', 'max-tokens', 'aborted', 'error'].includes(chunk.reason?.kind) ? chunk.reason.kind : 'other';
+            if (chunk.reason?.failure) finishFailure = { code: code(chunk.reason.failure.code),
+              status: Number.isInteger(chunk.reason.failure.status) && chunk.reason.failure.status >= 100
+                && chunk.reason.failure.status <= 599 ? chunk.reason.failure.status : null };
+          }
+          if (chunk.type !== 'text-delta' || !chunk.text) continue;
+          lastTextAt = performance.now(); textDeltaCount++; receivedTextChars += Array.from(chunk.text).length;
+          const nonWhitespace = Array.from(chunk.text).filter(c => !/\s/u.test(c)).length;
+          nonWhitespaceCharacterCount += nonWhitespace;
+          if (nonWhitespace) firstNonWhitespaceTextMs ??= lastTextAt - started;
+          if (!first) { first = true; firstTextMs = performance.now() - started;
+            appendFileSync(quickJournal, JSON.stringify({ at: Date.now(), kind: 'quick.first_text', requestId: job.requestId, attemptId, firstTextMs }) + '\n');
+            emit('model.delta', { owner: job, phase: 'quick', attemptId,
+            time: Date.now(), elapsedMs: firstTextMs, category: 'text-delta' }); }
+          const next = shortReply(text, chunk.text, limits.maxChars);
+          const delta = next.text.slice(text.length); text = next.text;
+          if (delta) emit('speech.delta', { owner: job, phase: 'quick', attemptId, text: delta });
+          if (next.done) { streamExit = 'short-reply'; break; }
+        }
+        if (streamExit === 'pending') streamExit = 'exhausted';
+      } catch (error) {
+        requestError = errorFacts(error);
+        if (streamExit === 'pending') streamExit = 'error';
+        // 超时被中断时，只要已经拿到文字就先播出去：宁可少几个字，也别整条没有接话。
+        if (!(error?.name === 'AbortError' && text.trim() && !/[\u3002\uff01\uff1f!?]$/.test(text))) throw error;
+        partialTextFallback = true;
+        text = text.replace(/[\uff0c\u3001\uff1b\uff1a]?$/u, '') + '\u3002';
+      }
+      if (!text.trim()) throw new Error('Quick reply contained no spoken text');
+        const messageId = randomUUID();
+        appendFileSync(quickJournal, JSON.stringify({ at: Date.now(), kind: 'quick.reply', requestId: job.requestId,
+          attemptId, messageId, text, completeMs: performance.now() - started }) + '\n');
+        if (!probe) {
+          undelivered.set(messageId, { id: messageId, text });
+          remember('用户', job.text); remember('助手', text);
+        }
+        emit('quick.completed', { owner: job, phase: 'quick', attemptId, messageId, text,
+          completeMs: performance.now() - started });
+        completed = true;
+        return { text, firstTextMs, preparationMs: started - preparedAt,
+          acceptedToStartMs,
+          historyChars: input.historyChars, inputChars: input.inputChars, systemChars: Array.from(input.system).length,
+          tools: 0, maxTokens: limits.maxTokens, reasoningEffort: 'off' };
+      } catch (error) {
+        requestError ??= errorFacts(error);
+        throw error;
+      } finally {
+        const ended = performance.now(), signalAbortedBeforeCleanup = controller.signal.aborted;
+        clearTimeout(timeout); controller.abort();
+        const diagnostics = { requestId: job.requestId, attemptId, outcome: completed ? 'completed' : 'failed',
+          elapsedMs: ended - started, receivedTextChars, nonWhitespaceCharacterCount, textDeltaCount,
+          spokenTextChars: Array.from(text).length, firstTextMs: firstTextMs ?? null, firstNonWhitespaceTextMs,
+          lastTextDeltaAgeMs: lastTextAt === undefined ? null : ended - lastTextAt,
+          finishReceived, finishReason, finishFailure, streamExit, timeoutMs: limits.timeoutMs, timeoutFiredAtMs,
+          signalAbortedBeforeCleanup, error: requestError, partialTextFallback,
+          streamCloseStartedMs, streamCloseMs, streamCloseError };
+        // Diagnostics must not turn an otherwise usable reply into a new failure.
+        try {
+          emit('quick.diagnostics', { owner: { requestId: job.requestId, voiceSessionId: job.voiceSessionId },
+            phase: 'quick', ...diagnostics });
+          appendFileSync(quickJournal, JSON.stringify({ at: Date.now(), kind: 'quick.diagnostics', ...diagnostics }) + '\n');
+        } catch { /* Existing request/reply journals retain their original error handling. */ }
+        if (!completed) emit('quick.aborted', { owner: job, attemptId });
+      }
+  };
+  const readyContinuations = new Map();
+  const quickLane = new QuickLane({ capacity: limits.capacity,
+    observe: (kind, job, extra = {}) => {
+      appendFileSync(quickJournal, JSON.stringify({ at: Date.now(), kind, job, ...extra }) + '\n');
+      record(kind, { owner: job, ...extra });
+    },
+    settle: job => { readyContinuations.set(job.requestId, job); },
+    run: async (job, controller) => (await runQuick(job, controller)).text,
+  });
+  for (const fact of recovered) if (fact.kind === 'input.queued') quickLane.seen.add(fact.job.requestId);
+
   ctx.on('tools/pre-execute', (exec, next) => exec.agent.id === sessionId && phase === 'quick'
     ? Promise.resolve({ kind: 'deny', reason: 'Quick response stage has no execution permission' }) : next(), { global: true });
   ctx.on('agent/pre-step', async ({ agent, step }, next) => {
@@ -103,13 +237,17 @@ export async function apply(ctx, config) {
       if (sender && owners.has(sender) && phase === 'idle') owner = owners.get(sender);
       if (session.id === sessionId && event.type === 'assistant/message') {
         const text = event.data.message.content.filter(c => c.type === 'text').map(c => c.text).join('\n').trim();
-        if (text && text !== '无需补充') undelivered.set(event.data.message.id, { id: event.data.message.id, text });
+        if (text && text !== '无需补充') { undelivered.set(event.data.message.id, { id: event.data.message.id, text });
+          remember('助手', text.split(/<|```/u)[0]); }
       }
       record('session', { sessionId: session.id, event: publicSessionEvent(event), owner: session.id === sessionId ? owner : owners.get(session.id), phase });
     }
   }, { global: true });
   ctx.on('agent/assistant-stream', ({ agent, frame }) => {
     if (agent.id !== sessionId) return;
+    if (frame.type === 'chunk' && frame.chunk.type === 'text-delta' && frame.chunk.text) {
+      record('speech.delta', { owner, phase, attemptId: frame.attemptId, text: frame.chunk.text });
+    }
     if (frame.type === 'start') { activity = phase === 'quick' ? 'quick' : 'thinking'; record('model.started', { owner, phase, attemptId: frame.attemptId,
       reasoningEffort: agent.model.current()?.reasoningEffort }); }
     else if (frame.type === 'chunk' && ['reasoning-delta', 'tool-call-delta', 'text-delta'].includes(frame.chunk.type)
@@ -144,7 +282,7 @@ export async function apply(ctx, config) {
       conversationStarted: parent.session.snapshotEvents().some(event => event.type === 'turn/start'),
       phase: parent.status === 'running' ? activity === 'tools' ? 'tools' : phase === 'quick' ? 'quick' : 'thinking'
         : [...children.values()].some(child => !child.ended) ? 'waiting-child' : 'idle',
-      queue: stages.snapshot(), children: [...children.values()], sequence,
+      queue: { ...stages.snapshot(), quickPending: quickLane.jobs.length, quickRunning: !!quickLane.running, quickError: quickLane.lastError, quickClosed: quickLane.closed, readyContinuations: readyContinuations.size }, children: [...children.values()], sequence,
     });
     if (req.method === 'GET' && url.pathname === '/events') {
       const after = Number(url.searchParams.get('after') ?? '0');
@@ -159,9 +297,25 @@ export async function apply(ctx, config) {
       body += chunk;
     }
     const input = JSON.parse(body || '{}');
+    if (req.method === 'POST' && url.pathname === '/continue') {
+      const job = readyContinuations.get(input.requestId);
+      if (!job) {
+        if (stages.seen.has(input.requestId)) return send(200, { accepted: true });
+        return send(409, { error: 'Quick reply has not settled' });
+      }
+      stages.enqueue(job, { quickDone: true });
+      readyContinuations.delete(input.requestId);
+      return send(202, { accepted: true });
+    }
+    if (req.method === 'POST' && url.pathname === '/quick-probe') {
+      const measured = await runQuick({ requestId: 'probe-' + randomUUID(), text: '你好，现在能听到吗？', acceptedAt: Date.now() }, new AbortController(), true);
+      const { text: _text, ...metrics } = measured;
+      return send(200, metrics);
+    }
     if (req.method === 'POST' && url.pathname === '/prompt') {
       if (typeof input.text !== 'string' || !input.text.trim() || typeof input.requestId !== 'string') throw new Error('text and requestId required');
-      stages.enqueue(input);
+      if (readyContinuations.size >= limits.capacity) return send(503, { error: 'Deep handoff queue full' });
+      quickLane.enqueue({ ...input, acceptedAt: Number.isFinite(input.acceptedAt) ? input.acceptedAt : Date.now() });
       record('prompt.accepted', { requestId: input.requestId });
       return send(202, { accepted: true, sessionId, requestId: input.requestId, queue: stages.snapshot() });
     }
@@ -183,6 +337,7 @@ export async function apply(ctx, config) {
   writeFileSync(config.readyFile, JSON.stringify({ port: server.address().port, sessionId }));
   ctx.on('dispose', async () => {
     closing = true;
+    await quickLane.close();
     parent.cancel({ kind: 'user' });
     await stages.close();
     server.closeAllConnections();
