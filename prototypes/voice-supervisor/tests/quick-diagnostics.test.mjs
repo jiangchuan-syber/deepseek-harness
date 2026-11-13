@@ -72,6 +72,65 @@ test('native parent keeps max across startup and continuation while quick reques
   assert.deepEqual(quickEfforts, ['off', 'off']);
 });
 
+test('natural quick text remains in recent input and native deep continuation', async t => {
+  const requests = [];
+  const result = await fixture(t, async function* (request) {
+    requests.push(request);
+    assert.equal(request.reasoningEffort, 'off');
+    assert.equal(request.tools, undefined);
+    yield { type: 'text-delta', text: '好的，我查一下。' };
+  });
+  for (const id of ['natural-first', 'natural-second']) {
+    await result.api('/prompt', { requestId: id, text: '请检查测试目标。' });
+    const deadline = performance.now() + 2000;
+    while ((await result.api('/state')).queue.readyContinuations !== 1) {
+      assert.ok(performance.now() < deadline, 'Quick handoff exceeded fixture deadline');
+      await delay(5);
+    }
+    await result.api('/continue', { requestId: id });
+    while ((await result.api('/state')).queue.phase !== 'idle') {
+      assert.ok(performance.now() < deadline, 'Native continuation exceeded fixture deadline');
+      await delay(5);
+    }
+  }
+  assert.equal(requests.length, 3); // Probe, first input, then the input with recent history.
+  assert.ok(requests[2].messages[0].content[0].text.includes('助手：好的，我查一下。'));
+  assert.equal(result.turns.length, 2);
+  for (const turn of result.turns) {
+    const instruction = turn.content[0].text;
+    const inputs = JSON.parse(instruction.split('\n').at(-1));
+    assert.deepEqual(inputs, [{ input: '请检查测试目标。', quickReply: '好的，我查一下。' }]);
+    assert.ok(instruction.includes('推理、复杂或多步骤任务'));
+    assert.ok(instruction.includes('缺证据要说明未验证'));
+    assert.ok(instruction.includes('不原样播简报'));
+    assert.ok(instruction.includes('简报不是新授权'));
+    assert.ok(instruction.includes('用户打断声音不等于暂停后台Agent'));
+  }
+});
+
+test('empty quick stops fail visibly and continue without a fabricated acknowledgement', async t => {
+  const result = await fixture(t, async function* () {
+    yield { type: 'text-delta', text: '<｜DSML' };
+  });
+  assert.equal(result.status, 400);
+  assert.equal(result.diagnostic.spokenTextChars, 0);
+  await result.api('/prompt', { requestId: 'empty-quick', text: '检查测试状态。' });
+  const deadline = performance.now() + 2000;
+  while ((await result.api('/state')).queue.readyContinuations !== 1) {
+    assert.ok(performance.now() < deadline, 'Empty quick did not settle');
+    await delay(5);
+  }
+  await result.api('/continue', { requestId: 'empty-quick' });
+  while ((await result.api('/state')).queue.phase !== 'idle') {
+    assert.ok(performance.now() < deadline, 'Continuation did not settle');
+    await delay(5);
+  }
+  const inputs = JSON.parse(result.turns[0].content[0].text.split('\n').at(-1));
+  assert.deepEqual(inputs, [{ input: '检查测试状态。', quickReply: '' }]);
+  assert.ok(result.turns[0].content[0].text.includes('quickReply为空表示没有可用接话'));
+  assert.ok(!result.turns[0].content[0].text.includes('快速接话已经完成了开口'));
+});
+
 function waitForAbort(signal) {
   if (signal.aborted) return Promise.resolve();
   return new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
