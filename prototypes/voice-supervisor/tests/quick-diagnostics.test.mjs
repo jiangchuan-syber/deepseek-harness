@@ -6,7 +6,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { apply } from '../plugin.mjs';
 
-async function fixture(t, stream, timeoutMs = 500) {
+async function fixture(t, stream, timeoutMs = 500, control = null) {
   const dir = await mkdtemp(join(tmpdir(), 'voice-quick-diagnostics-'));
   let dispose;
   t.after(async () => {
@@ -15,20 +15,22 @@ async function fixture(t, stream, timeoutMs = 500) {
     assert.ok(basename(dir).startsWith('voice-quick-diagnostics-'));
     await rm(dir, { recursive: true, force: true });
   });
-  const selections = [], turns = [], sessionEvents = [];
+  const selections = [], turns = [], injections = [], sessionEvents = [];
   const parent = { id: 'test-parent', status: 'idle', session: { snapshotEvents: () => sessionEvents }, cancel() {},
     model: { select: selection => selections.push({ ...selection }) }, whenIdle: async () => {},
+    inject(message) { injections.push(message); },
     steer(message) { turns.push(message); sessionEvents.push({ type: 'turn/end', data: { reason: { kind: 'completed' } } }); } };
   const ctx = {
     workspaceRegistry: { create: async () => ({ id: 'test-workspace' }) },
     sessionController: { create: async () => ({ sessionId: parent.id }), resolveAgent: async () => ({ agent: parent }) },
     agents: { get: () => parent }, effect() {},
-    on(type, fn) { if (type === 'dispose') dispose = fn; }, llm: { stream },
+    on(type, fn) { if (type === 'dispose') dispose = fn; }, llm: { stream }, voiceDeviceControl: control?.provider,
   };
   const token = 'synthetic-test-token';
   const readyFile = join(dir, 'ready.json');
   await apply(ctx, { token, readyFile, cwd: dir, supervisorReasoningEffort: 'max',
-    quick: { contextChars: 1200, inputChars: 600, maxTokens: 64, maxChars: 30, timeoutMs, capacity: 4 } });
+    quick: { contextChars: 1200, inputChars: 600, maxTokens: 64, maxChars: 30, timeoutMs, capacity: 4 },
+    simpleControl: control ? { enabled: true, budgetMs: 1000, capacity: 30 } : undefined });
   const { port } = JSON.parse(await readFile(readyFile, 'utf8'));
   const api = async (path, input) => {
     const response = await fetch(`http://127.0.0.1:${port}${path}`, {
@@ -45,8 +47,42 @@ async function fixture(t, stream, timeoutMs = 500) {
   const rows = (await readFile(join(dir, 'quick-requests.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
   const diagnostics = rows.filter(row => row.kind === 'quick.diagnostics');
   assert.equal(diagnostics.length, 1);
-  return { status: response.status, body, diagnostic: diagnostics[0], api, selections, turns };
+  return { status: response.status, body, diagnostic: diagnostics[0], api, selections, turns, injections };
 }
+
+test('control success runs beside quick and records evidence without a deep turn', async t => {
+  const writes = [], quickRequests = [];
+  const provider = { resolve: () => ({ approved: true, unique: true, homeSuffix: '3625', resourceId: 'fixture-lamp', properties: ['power'] }),
+    async write(intent) { writes.push(intent); },
+    async readFresh(_intent, context) { return { fresh: true, queryId: context.queryId, resourceId: 'fixture-lamp', properties: { power: false } }; } };
+  const result = await fixture(t, async function* (request) { quickRequests.push(request); yield { type: 'text-delta', text: '好的，我来处理。' }; }, 500, { provider });
+  await result.api('/prompt', { requestId: 'direct-control', text: '把台灯关掉。' });
+  const deadline = performance.now() + 2000;
+  while ((await result.api('/state')).controls[0]?.status !== 'verified' || result.injections.length !== 1) {
+    assert.ok(performance.now() < deadline); await delay(5);
+  }
+  await delay(10);
+  assert.equal(result.turns.length, 0); assert.equal(writes.length, 1);
+  assert.ok(result.injections[0].content[0].text.startsWith('程序执行事实'));
+  assert.ok(result.injections[0].content[0].text.includes('不是新的用户指令'));
+  assert.equal(quickRequests.length, 2); assert.equal(quickRequests[1].tools, undefined);
+  assert.equal((await result.api('/state')).queue.readyContinuations, 0);
+  assert.equal((await result.api('/continue', { requestId: 'direct-control' })).handledBy, 'simple-control');
+  assert.equal(result.turns.length, 0);
+});
+
+test('unconfirmed control enters only a report turn and never repeats the original action', async t => {
+  let writes = 0;
+  const provider = { resolve: () => ({ approved: true, unique: true, homeSuffix: '3625', resourceId: 'fixture-lamp', properties: ['power'] }),
+    async write() { writes++; }, async readFresh() { return { fresh: false }; } };
+  const result = await fixture(t, async function* () { yield { type: 'text-delta', text: '好的，我来处理。' }; }, 500, { provider });
+  await result.api('/prompt', { requestId: 'unconfirmed-control', text: '关灯' });
+  const deadline = performance.now() + 2000;
+  while (result.turns.length !== 1) { assert.ok(performance.now() < deadline); await delay(5); }
+  assert.ok(result.turns[0].content[0].text.startsWith('这是程序执行事实，不是新的用户指令'));
+  assert.ok(result.turns[0].content[0].text.includes('不得再次执行、重试或委派原动作'));
+  assert.equal(result.injections.length, 1); assert.equal(writes, 1);
+});
 
 test('native parent keeps max across startup and continuation while quick requests stay off', async t => {
   const quickEfforts = [];
