@@ -53,6 +53,7 @@ export class MiioLampProvider {
               || value.model !== 'yeelink.light.lamp27' || value.mode !== this.mode
               || value.resourceId !== 'miio-lamp-' + this.config.expectedLampHash
               || !/^[a-f0-9]{64}$/.test(value.homeHash ?? '')
+              || (!this.config.fixture && value.sharedGuardProtocol !== 1)
               || value.transport !== (this.config.fixture ? 'fixture' : 'miio')) {
             rejectReady(failure('broker_identity_mismatch')); void this.terminate(child); return;
           }

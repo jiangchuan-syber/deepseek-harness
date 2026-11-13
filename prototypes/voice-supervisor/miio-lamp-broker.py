@@ -4,6 +4,7 @@ import contextlib
 import ctypes
 from ctypes import wintypes
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -197,13 +198,30 @@ def main():
     args = parser.parse_args()
     home_hash, device, identity = inventory(args.workspace.resolve() / 'server/data/xiaomi-tokens.json', args.expected_lamp_hash)
     lock = OwnerLock(home_hash)
+    shared_lock = None
+    guard_protocol = 0
     resource = 'miio-lamp-' + args.expected_lamp_hash
     clock_id = str(uuid.uuid4())
     try:
+        guard_path = args.workspace.resolve() / 'server/miio_control_guard.py'
+        if guard_path.is_file():
+            spec = importlib.util.spec_from_file_location('voice_miio_shared_guard', guard_path)
+            guard = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(guard)
+            if guard.PROTOCOL_VERSION != 1:
+                raise Refused('shared_guard_version_mismatch')
+            # Use the same physical-DID lock as ordinary xiaomi_ctl invocations.
+            payload = json.loads((args.workspace.resolve() / 'server/data/xiaomi-tokens.json').read_text(encoding='utf-8-sig'))
+            home = next(h for block in payload for h in block.get('homes', []) if digest(h.get('home_id', '')) == home_hash)
+            shared_lock = guard.ResourceGuard(guard.resource_key(home['home_id'], identity))
+            guard_protocol = 1
+        elif not args.fixture:
+            raise Refused('shared_guard_unavailable')
         transport = FixtureLamp(args.fixture.resolve()) if args.fixture else RealLamp(device, identity)
         emit({'kind': 'ready', 'protocol': 1, 'ownerId': args.owner_id, 'homeHash': home_hash,
             'didHash': args.expected_lamp_hash, 'model': MODEL, 'resourceId': resource, 'mode': args.mode,
-            'transport': 'fixture' if args.fixture else 'miio', 'clockId': clock_id})
+            'transport': 'fixture' if args.fixture else 'miio', 'clockId': clock_id,
+            'sharedGuardProtocol': guard_protocol})
         while True:
             request = line()
             if request is None:
@@ -258,6 +276,8 @@ def main():
                     'error': {'code': str(error) if isinstance(error, Refused) else 'device_operation_failed',
                               'type': type(error).__name__, 'outcome': 'unknown' if write_started else 'not_started'}})
     finally:
+        if shared_lock is not None:
+            shared_lock.close()
         lock.close()
 
 

@@ -31,3 +31,7 @@ Node 与 Python 持续时间各有时钟身份；Python 使用 `perf_counter_ns`
 `node --import tsx/esm --test prototypes/voice-supervisor/tests/miio-provider.test.mjs` 使用文件设备夹具，覆盖跨进程 owner 竞争、拒绝过时授权、排队截止时间，以及模拟副作用后杀掉执行器再只读恢复 ledger，不操作真实台灯。
 
 `miio-readonly-smoke.mjs` 必须显式给出 `--python`、`--workspace`、`--expected-lamp-hash`、`--output`、`--budget-ms`、`--startup-timeout-ms` 和 `--close-timeout-ms`。模式固定只读，不能选择 setter、改变生产配置或调用 TTS。实际报告保留在 Git 之外；不得用它执行真实写测试。
+
+## 共享 CLI 守卫依赖
+
+真实传输现在要求 workspace `server/miio_control_guard.py` 协议 1，并报告 `sharedGuardProtocol=1`。实际 home+DID 的内核锁与协作版小米 CLI 共用，broker 继续保留家庭唯一 owner。模块缺失或版本不符会在网络请求前拒绝；应先部署核对匹配的 CLI/模块。本次不启用生产执行。Node 仍是唯一命令台账；独立 CLI 调用不等于跨任务 exactly-once，也不是任意 shell 权限沙箱。

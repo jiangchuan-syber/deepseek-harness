@@ -31,3 +31,7 @@ Node and Python durations have separate clock identities. Python uses `perf_coun
 `node --import tsx/esm --test prototypes/voice-supervisor/tests/miio-provider.test.mjs` runs file-backed fixtures, including cross-process owner contention, denied stale grants, queued deadlines and a write killed after a simulated side effect followed by read-only ledger recovery. It does not operate a real lamp.
 
 `miio-readonly-smoke.mjs` requires explicit `--python`, `--workspace`, `--expected-lamp-hash`, `--output`, `--budget-ms`, `--startup-timeout-ms` and `--close-timeout-ms`. Its mode is fixed to read-only; it cannot select a setter, change production configuration or run TTS. Save actual reports outside Git. No real write test belongs in its invocation.
+
+## Shared CLI guard dependency
+
+Real transport now requires workspace `server/miio_control_guard.py` protocol 1 and reports `sharedGuardProtocol=1`. Its physical home+DID kernel lock is shared with the cooperative Xiaomi CLI, while the broker retains its unique home owner. Missing/mismatched code fails closed before any network request. Deploy and verify the matching CLI/module first; this change does not enable live execution. The Node ledger remains the only command ledger; a separate CLI invocation is not an exactly-once task or a shell sandbox.
