@@ -35,3 +35,7 @@ Node 与 Python 持续时间各有时钟身份；Python 使用 `perf_counter_ns`
 ## 共享 CLI 守卫依赖
 
 真实传输现在要求 workspace `server/miio_control_guard.py` 协议 1，并报告 `sharedGuardProtocol=1`。实际 home+DID 的内核锁与协作版小米 CLI 共用，broker 继续保留家庭唯一 owner。模块缺失或版本不符会在网络请求前拒绝；应先部署核对匹配的 CLI/模块。本次不启用生产执行。Node 仍是唯一命令台账；独立 CLI 调用不等于跨任务 exactly-once，也不是任意 shell 权限沙箱。
+
+## 一次预告动作窗口
+
+`miio-controlled-action.mjs` 默认关闭，未接生产。必须显式给 `--allow-write-test`、固定workspace/解释器、预期台灯hash、新commandId、私有ledger/报告、准确expected-current/target on/off，以及可撤销session文件nonce。它先新读身份/状态，再由Node持久命令台账执行一次写和独立fresh查询，动作预算3000ms；预检冷启动单独记录。旧commandId不能当新样本重放；不自动恢复。恢复是检查用户意图及当前状态之后的独立新命令，用户介入则撤销session。本报告保留物理目标NOT_RUN，只验软件action到协议新读回。

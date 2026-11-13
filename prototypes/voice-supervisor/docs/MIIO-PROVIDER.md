@@ -35,3 +35,7 @@ Node and Python durations have separate clock identities. Python uses `perf_coun
 ## Shared CLI guard dependency
 
 Real transport now requires workspace `server/miio_control_guard.py` protocol 1 and reports `sharedGuardProtocol=1`. Its physical home+DID kernel lock is shared with the cooperative Xiaomi CLI, while the broker retains its unique home owner. Missing/mismatched code fails closed before any network request. Deploy and verify the matching CLI/module first; this change does not enable live execution. The Node ledger remains the only command ledger; a separate CLI invocation is not an exactly-once task or a shell sandbox.
+
+## One announced action window
+
+`miio-controlled-action.mjs` is default-disabled and is not registered in production. Explicit `--allow-write-test`, fixed workspace/interpreter, expected lamp hash, new command ID, private ledger/report, exact expected-current/target on/off and revocable session-file nonce are all required. It first queries identity/current state, then one durable Node command performs one write plus independent fresh query within a 3000ms action budget. Preflight cold startup is recorded separately. Old command IDs cannot be replayed as new samples; no automatic restore occurs. A restoration is a separate new command after checking user intent and current state; revoke the session instead if the user intervenes. Reports retain physical goal NOT_RUN and only test software-action-to-protocol-readback.
