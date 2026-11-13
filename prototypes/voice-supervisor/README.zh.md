@@ -11,6 +11,7 @@
 - [产品需求](docs/PRD.zh.md)
 - [开发与验收计划](docs/PLAN.zh.md)
 - [运行评审](docs/2026-10-31-runtime-review.zh.md)
+- [可选台灯 Provider](docs/MIIO-PROVIDER.zh.md)
 
 ## 运行
 

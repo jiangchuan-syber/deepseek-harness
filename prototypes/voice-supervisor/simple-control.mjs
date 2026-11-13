@@ -105,14 +105,20 @@ export class SimpleControlLane {
     const controller = new AbortController(); entry.controller = controller;
     const timeout = setTimeout(() => controller.abort('deadline'), Math.max(0, deadline - this.now()));
     const context = { commandId: entry.commandId, goalVersion: entry.goalVersion, resourceId: entry.resourceId,
-      signal: controller.signal, deadline, now: this.now, clockId: this.clockId };
+      signal: controller.signal, deadline, now: this.now, clockId: this.clockId,
+      isCurrent: () => this.versions.get(entry.resourceId) === entry.goalVersion };
     const expired = () => controller.signal.aborted || this.now() >= deadline;
     try {
       if (expired()) { entry.status = 'cancelled'; entry.error = 'expired_before_write'; return; }
       if (!reconcileOnly) {
         entry.status = 'writing'; entry.writeAttempted = true; this.publish(entry);
         try { await this.provider.write(entry.intent, context); entry.writeAcknowledged = true; }
-        catch { entry.error = 'write_outcome_unknown'; }
+        catch (error) {
+          if (error?.outcome === 'not_started') {
+            entry.writeAttempted = false; entry.status = 'rejected'; entry.error = error.code ?? 'write_not_started'; return;
+          }
+          entry.error = 'write_outcome_unknown';
+        }
       }
       if (expired()) { entry.status = 'unknown'; entry.error = 'deadline_after_possible_write'; return; }
       entry.status = 'reading'; entry.readIssuedAt = this.now(); this.publish(entry);

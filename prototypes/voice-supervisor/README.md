@@ -11,6 +11,7 @@ The local runtime exposes authenticated `/health/live` and `/health/ready` endpo
 - [Product requirements](docs/PRD.zh.md)
 - [Development and acceptance plan](docs/PLAN.zh.md)
 - [Runtime review](docs/2026-10-31-runtime-review.zh.md)
+- [Optional lamp provider](docs/MIIO-PROVIDER.zh.md)
 
 ## Run
 

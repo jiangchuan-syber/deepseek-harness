@@ -110,6 +110,14 @@ test('unknown write is read back without retrying its side effect', async () => 
   assert.equal(f.reads.length, 1);
 });
 
+test('a provider refusal before transmission cannot become a verified action', async () => {
+  const f = fixture({ async write() { throw Object.assign(new Error('write disabled'), { outcome: 'not_started', code: 'actuation_disabled' }); } });
+  f.lane.offer({ requestId: 'not-authorized', text: '关灯' });
+  const result = await f.lane.settled('not-authorized');
+  assert.equal(result.status, 'rejected'); assert.equal(result.writeAttempted, false);
+  assert.equal(result.error, 'actuation_disabled'); assert.equal(f.reads.length, 0);
+});
+
 test('expired write remains unknown, and expired queued work never writes', async () => {
   const f = fixture({ async write() { f.advance(1001); } });
   f.lane.offer({ requestId: 'expired-write', text: '开灯' });
