@@ -27,7 +27,9 @@ export class StageQueue {
   async drain() {
     while (!this.closed && (this.inputs.length || this.continuations.length)) {
       const phase = this.inputs.length ? 'quick' : 'thinking';
-      const batch = phase === 'quick' ? [this.inputs.shift()] : this.continuations.splice(0);
+      const firstReport = this.continuations.findIndex(item => item.controlReport);
+      const batch = phase === 'quick' ? [this.inputs.shift()] : this.continuations[0].controlReport
+        ? [this.continuations.shift()] : this.continuations.splice(0, firstReport < 0 ? this.continuations.length : firstReport);
       const job = batch.at(-1);
       this.lastError = null; this.current = { phase, job }; this.publish('phase.started', job, { mergedRequests: batch.map(j => j.requestId) });
       try {
