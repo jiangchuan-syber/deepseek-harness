@@ -21,6 +21,28 @@ test('short output stops at a natural ending, hides markup and caps Unicode char
   assert.equal(Array.from(result.text).length,30);assert.ok(result.text.endsWith('。'));
 });
 
+test('quick replies honor small Unicode caps without protecting a fixed opening', () => {
+  assert.deepEqual(shortReply('', '好的，马上检查。', 30), { text: '好的，马上检查。', done: true });
+  assert.deepEqual(shortReply('', '马上检查。', 2), { text: '马。', done: true });
+  assert.deepEqual(shortReply('', '😀马上检查。', 3), { text: '😀马。', done: true });
+});
+
+test('a stop before usable text stays empty instead of fabricating speech', () => {
+  assert.deepEqual(shortReply('', '<｜DSML', 30), { text: '', done: true });
+  assert.deepEqual(shortReply('', '\n后面的话', 30), { text: '', done: true });
+  assert.deepEqual(shortReply('', '，。！', 30), { text: '', done: true });
+  assert.deepEqual(shortReply('', '  ', 30), { text: '', done: false });
+  assert.deepEqual(shortReply('', '，好的，我看看。', 30), { text: '好的，我看看。', done: true });
+});
+
+test('quick system is brief and allows natural acknowledgement without routing', () => {
+  assert.ok(Array.from(QUICK_SYSTEM).length <= 200);
+  assert.ok(!QUICK_SYSTEM.includes('我在'));
+  assert.ok(QUICK_SYSTEM.includes('好的，我立刻处理'));
+  assert.match(QUICK_SYSTEM, /不路由分派/u);
+  assert.match(QUICK_SYSTEM, /不声称已执行完成/u);
+});
+
 test('quick acknowledgement completes while main deep processing is blocked', async () => {
   const started=barrier(), release=barrier(), second=barrier(), events=[];
   const main=new StageQueue({observe(){},run:async(phase,job)=>{
