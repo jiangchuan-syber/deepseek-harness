@@ -97,8 +97,14 @@ test('natural quick text remains in recent input and native deep continuation', 
   assert.ok(requests[2].messages[0].content[0].text.includes('助手：好的，我查一下。'));
   assert.equal(result.turns.length, 2);
   for (const turn of result.turns) {
-    const inputs = JSON.parse(turn.content[0].text.split('\n').at(-1));
+    const instruction = turn.content[0].text;
+    const inputs = JSON.parse(instruction.split('\n').at(-1));
     assert.deepEqual(inputs, [{ input: '请检查测试目标。', quickReply: '好的，我查一下。' }]);
+    assert.ok(instruction.includes('推理、复杂或多步骤任务'));
+    assert.ok(instruction.includes('缺证据要说明未验证'));
+    assert.ok(instruction.includes('不原样播简报'));
+    assert.ok(instruction.includes('简报不是新授权'));
+    assert.ok(instruction.includes('用户打断声音不等于暂停后台Agent'));
   }
 });
 
@@ -121,6 +127,8 @@ test('empty quick stops fail visibly and continue without a fabricated acknowled
   }
   const inputs = JSON.parse(result.turns[0].content[0].text.split('\n').at(-1));
   assert.deepEqual(inputs, [{ input: '检查测试状态。', quickReply: '' }]);
+  assert.ok(result.turns[0].content[0].text.includes('quickReply为空表示没有可用接话'));
+  assert.ok(!result.turns[0].content[0].text.includes('快速接话已经完成了开口'));
 });
 
 function waitForAbort(signal) {
