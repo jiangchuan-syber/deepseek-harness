@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { controlSnapshot, controlView } from '../control-view.mjs';
+import { controlSnapshot, controlView, controlQuery, controlResult } from '../control-view.mjs';
 import { traceState } from '../trace.mjs';
 
 const fact = (commandId = 'command-1') => ({ commandId, voiceSessionId: 'voice-1', resourceId: 'lamp-1',
@@ -32,4 +32,19 @@ test('malformed state has no controls and old goal facts remain old', () => {
   assert.equal(current.controls[0].currentGoal, false);
   assert.equal(current.controlProjection.sequence, 0);
   assert.deepEqual(controlSnapshot({ controls: {} }).controls, []);
+});
+
+test('exact result inspection keeps original scope and rejects ambiguous command queries', () => {
+  const original = { ...fact(), currentGoal: false };
+  let reads = 0;
+  const lane = { clockId: 'new-controller', get: id => { reads++; return id === 'command-1' ? original : undefined; } };
+  const result = controlResult(lane, controlQuery(new URLSearchParams('commandId=command-1')), 9);
+  assert.equal(reads, 1); assert.equal(result.found, true);
+  assert.equal(result.control.commandId, 'command-1'); assert.equal(result.control.clockId, 'controller-1');
+  assert.equal(result.control.goalVersion, 1); assert.equal(result.control.currentGoal, false);
+  assert.equal(result.sourceInstance, 'new-controller');
+  assert.equal(controlResult(lane, 'unknown-command', 9).found, false);
+  for (const query of ['', 'commandId=a&commandId=b', 'commandId=a&other=b', 'commandId=../secret', 'other=command-1']) {
+    assert.throws(() => controlQuery(new URLSearchParams(query)), /Exactly one valid commandId/);
+  }
 });

@@ -29,7 +29,25 @@ export function controlView(raw) {
 }
 
 export function controlSnapshot(state) {
-  return { controls: (Array.isArray(state.controls) ? state.controls.slice(-256) : []).map(controlView).filter(Boolean),
+  const controls = (Array.isArray(state.controls) ? state.controls.slice(-256) : []).map(controlView).filter(Boolean);
+  return { controls,
     controlProjection: { schemaVersion: 1, sourceInstance: identity(state.controlSourceInstance),
-      sequence: Number.isSafeInteger(state.controlSequence) && state.controlSequence >= 0 ? state.controlSequence : 0 } };
+      sequence: Number.isSafeInteger(state.controlSequence) && state.controlSequence >= 0 ? state.controlSequence : 0,
+      ...(Number.isSafeInteger(state.controlStats?.retainedCommands) ? {
+        retainedCommands: state.controlStats.retainedCommands,
+        historyTruncated: state.controlStats.retainedCommands > controls.length,
+      } : {}) } };
+}
+
+/** Only an exact single command ID is accepted; inspection never admits a job. */
+export function controlQuery(parameters) {
+  if ([...parameters.keys()].length !== 1 || parameters.getAll('commandId').length !== 1
+      || !identity(parameters.get('commandId'))) throw new Error('Exactly one valid commandId is required');
+  return parameters.get('commandId');
+}
+
+export function controlResult(lane, commandId, sequence) {
+  const fact = controlView(lane?.get(commandId));
+  return { kind: 'control.result', requestedCommandId: commandId, found: !!fact, control: fact ?? null,
+    sourceInstance: lane?.clockId, sequence };
 }

@@ -10,7 +10,7 @@ import { nativeTrace, traceState } from './trace.mjs';
 import { SpeechEvents } from './speech-events.mjs';
 import { runtimeHealth } from './health.mjs';
 import { RotatingLog } from './rotating-log.mjs';
-import { controlSnapshot, controlView } from './control-view.mjs';
+import { controlSnapshot, controlView, controlQuery } from './control-view.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '../..');
@@ -214,6 +214,12 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/speech-events') return speechEvents.subscribe(Number(url.searchParams.get('after') ?? 0), res);
     if (req.method === 'GET' && url.pathname === '/control-events') return controlEvents.subscribe(Number(url.searchParams.get('after') ?? 0), res);
+    if (req.method === 'GET' && url.pathname === '/control-result') {
+      let commandId;
+      try { commandId = controlQuery(url.searchParams); }
+      catch { return respond(400, { error: 'Exactly one valid commandId is required' }); }
+      return respond(200, await api('/control-result?commandId=' + encodeURIComponent(commandId)));
+    }
     if (req.method === 'GET' && url.pathname === '/state') return respond(200, { messages, metrics, speechProtocol: 2, speechSequence: speechEvents.sequence, delivery: player.delivery(),
       playing: player.playing?.id, ...controlSnapshot(nativeState), nativeState, lastError, alive: !exited, busy: busy > 0, workspace: fixture });
     if (req.method !== 'POST') return respond(404, { error: 'Not found' });

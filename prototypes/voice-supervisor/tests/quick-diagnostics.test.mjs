@@ -48,14 +48,15 @@ async function fixture(t, stream, timeoutMs = 500, control = null) {
   }
   await apply(ctx, { token, readyFile, cwd: dir, supervisorReasoningEffort: 'max',
     quick: { contextChars: 1200, inputChars: 600, maxTokens: 64, maxChars: 30, timeoutMs, capacity: 4 },
-    simpleControl: control ? { enabled: control.enabled ?? true, budgetMs: 1000, capacity: 30,
+    simpleControl: control ? { enabled: control.enabled ?? true, budgetMs: 1000, capacity: control.capacity ?? 30,
       provider: providerConfig } : undefined });
   const { port } = JSON.parse(await readFile(readyFile, 'utf8'));
-  const api = async (path, input) => {
-    const response = await fetch(`http://127.0.0.1:${port}${path}`, {
-      method: input === undefined ? 'GET' : 'POST', headers: { authorization: `Bearer ${token}` },
+  const apiRaw = (path, input, headers = {}) => fetch(`http://127.0.0.1:${port}${path}`, {
+      method: input === undefined ? 'GET' : 'POST', headers: { authorization: `Bearer ${token}`, ...headers },
       body: input === undefined ? undefined : JSON.stringify(input),
     });
+  const api = async (path, input) => {
+    const response = await apiRaw(path, input);
     assert.ok(response.ok, 'Local fixture API failed: ' + response.status);
     return response.json();
   };
@@ -66,7 +67,7 @@ async function fixture(t, stream, timeoutMs = 500, control = null) {
   const rows = (await readFile(join(dir, 'quick-requests.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
   const diagnostics = rows.filter(row => row.kind === 'quick.diagnostics');
   assert.equal(diagnostics.length, 1);
-  return { status: response.status, body, diagnostic: diagnostics[0], api, selections, turns, injections,
+  return { status: response.status, body, diagnostic: diagnostics[0], api, apiRaw, selections, turns, injections,
     providerState: async () => JSON.parse(await readFile(stateFile, 'utf8')),
     close: async () => { const owned = dispose; dispose = undefined; await owned(); } };
 }
@@ -95,6 +96,40 @@ test('disabled control configuration never constructs even an invalid broker pro
     500, { enabled: false, providerConfig: { kind: 'miio-lamp', enabled: true } });
   const state = await result.api('/state');
   assert.deepEqual(state.controls, []); assert.equal(state.controlSourceInstance, undefined);
+});
+
+test('authenticated exact command inspection survives bounded snapshots without any new action', async t => {
+  let power = true, writes = 0, queries = 0;
+  const provider = {
+    resolve: () => ({ approved: true, unique: true, homeSuffix: '3625', resourceId: 'fixture-lamp', properties: ['power'] }),
+    async write(intent) { writes++; power = intent.value; },
+    async readFresh(_intent, context) { queries++; return { resourceId: 'fixture-lamp', fresh: true,
+      queryId: context.queryId, properties: { power } }; },
+  };
+  const result = await fixture(t, async function* () { yield { type: 'text-delta', text: '好的，我来处理。' }; },
+    500, { provider, capacity: 1, blockMax: true });
+  for (let i = 0; i < 3; i++) {
+    await result.api('/prompt', { requestId: 'inspect-' + i, voiceSessionId: 'voice-' + i, text: '关灯' });
+    const deadline = performance.now() + 1000;
+    while ((await result.api('/state')).controls.find(c => c.commandId === 'inspect-' + i)?.status !== 'verified') {
+      assert.ok(performance.now() < deadline); await delay(5);
+    }
+  }
+  const state = await result.api('/state');
+  assert.equal(state.controls.length, 1); assert.equal(state.controlStats.activeAdmissions, 0);
+  const stored = await result.api('/control-result?commandId=inspect-0');
+  assert.equal(stored.found, true); assert.equal(stored.control.commandId, 'inspect-0');
+  assert.equal(stored.control.voiceSessionId, 'voice-0'); assert.equal(stored.control.goalVersion, 1);
+  assert.equal(stored.control.currentGoal, false); assert.equal(writes, 3); assert.equal(queries, 3);
+  if (process.env.VOICE_CONTROL_CONTRACT_OUT) {
+    await writeFile(process.env.VOICE_CONTROL_CONTRACT_OUT, JSON.stringify(stored));
+  }
+  assert.equal((await result.api('/control-result?commandId=not-known')).found, false);
+  for (const path of ['/control-result', '/control-result?commandId=a&commandId=b', '/control-result?commandId=../secret']) {
+    assert.equal((await result.apiRaw(path)).status, 400);
+  }
+  assert.equal((await result.apiRaw('/control-result?commandId=inspect-0', undefined, { authorization: 'Bearer wrong' })).status, 403);
+  assert.equal(writes, 3); assert.equal(queries, 3); assert.equal(result.turns.length, 0);
 });
 
 test('a provider cleanup error is reported after the plugin HTTP listener is closed', async t => {

@@ -8,6 +8,7 @@ import { QuickLane, quickInput, shortReply } from './quick.mjs';
 import { publicSessionEvent } from './trace.mjs';
 import { SimpleControlLane } from './simple-control.mjs';
 import { createControlProvider } from './control-provider.mjs';
+import { controlQuery, controlResult } from './control-view.mjs';
 
 /** Opt-in local experiment. Mount through a dsh profile; no installed source is modified. */
 export const name = 'voice-supervisor-lab';
@@ -312,13 +313,16 @@ export async function apply(ctx, config) {
     if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected) || req.headers.origin) return send(403, { error: 'Forbidden' });
     if (closing) return send(503, { error: 'Shutting down' });
     const url = new URL(req.url, 'http://localhost');
+    if (req.method === 'GET' && url.pathname === '/control-result') {
+      return send(200, controlResult(controlLane, controlQuery(url.searchParams), controlSequence));
+    }
     if (req.method === 'GET' && url.pathname === '/state') return send(200, {
       sessionId, status: parent.status,
       conversationStarted: parent.session.snapshotEvents().some(event => event.type === 'turn/start'),
       phase: parent.status === 'running' ? activity === 'tools' ? 'tools' : phase === 'quick' ? 'quick' : 'thinking'
         : [...children.values()].some(child => !child.ended) ? 'waiting-child' : 'idle',
       queue: { ...stages.snapshot(), quickPending: quickLane.jobs.length, quickRunning: !!quickLane.running, quickError: quickLane.lastError, quickClosed: quickLane.closed, readyContinuations: readyContinuations.size }, controls: controlLane?.state() ?? [],
-      controlSourceInstance: controlLane?.clockId, controlSequence, children: [...children.values()], sequence,
+      controlSourceInstance: controlLane?.clockId, controlSequence, controlStats: controlLane?.stats(), children: [...children.values()], sequence,
     });
     if (req.method === 'GET' && url.pathname === '/events') {
       const after = Number(url.searchParams.get('after') ?? '0');
