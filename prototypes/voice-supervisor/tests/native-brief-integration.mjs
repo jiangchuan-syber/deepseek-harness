@@ -118,6 +118,8 @@ try {
     await delay(25);
   }
   assert.ok(dispatched && childAnswers >= 1 && rewrites >= 1, 'Actual child/inbox/parent second generation not proven');
+  assert.ok(events.some(e => e.type === 'session' && e.data.event.type === 'assistant/message'
+    && JSON.stringify(e.data.event.data).includes(rewritten)), 'Parent rewrite did not settle as a real assistant message');
   assert.ok(events.some(e => e.type === 'child.started') && events.some(e => e.type === 'child.ended'));
   assert.ok(events.some(e => e.type === 'session' && ['agent-message', 'subagent-settled'].includes(e.data.event.data?.source?.kind)), 'Actual parent did not receive a child notice');
   assert.equal(secretHeaderRejected, false); report.events = events; report.status = 'PASS';
