@@ -1,0 +1,16 @@
+# Bilingual-pair consistency record for guide.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/upgrade-guide/v0.2.2-alpha.2/voice-control-history-lookup/guide.md
+/:
+  en: 697abc6ec7a93d06
+  zh: f3fd9b87919e0b33
+/read-retained-voice-control-results-explicitly:
+  en: c71d00e4d9ed880c
+  zh: a1f5e404d4c60cd7
+/read-retained-voice-control-results-explicitly/change:
+  en: 7ac622202e44ef16
+  zh: 45b5f4b778ddba57
+/read-retained-voice-control-results-explicitly/migration:
+  en: fda62873d8826dd2
+  zh: faa0146da8c9f666

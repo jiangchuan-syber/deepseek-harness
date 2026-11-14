@@ -1,12 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { apply } from '../plugin.mjs';
+import { traceState } from '../trace.mjs';
 
-async function fixture(t, stream, timeoutMs = 500) {
+async function fixture(t, stream, timeoutMs = 500, options = {}) {
+  const { probe = true, parentId = 'test-parent' } = options;
+  const control = options.provider || options.providerConfig || options.miioFixture ? options : null;
   const dir = await mkdtemp(join(tmpdir(), 'voice-quick-diagnostics-'));
   let dispose;
   t.after(async () => {
@@ -15,29 +19,52 @@ async function fixture(t, stream, timeoutMs = 500) {
     assert.ok(basename(dir).startsWith('voice-quick-diagnostics-'));
     await rm(dir, { recursive: true, force: true });
   });
-  const selections = [], turns = [], sessionEvents = [];
-  const parent = { id: 'test-parent', status: 'idle', session: { snapshotEvents: () => sessionEvents }, cancel() {},
-    model: { select: selection => selections.push({ ...selection }) }, whenIdle: async () => {},
+  const selections = [], turns = [], injections = [], sessionEvents = [], parentCancellations = [], childInterruptions = [];
+  const parent = { id: parentId, status: 'idle', session: { snapshotEvents: () => sessionEvents }, cancel: reason => parentCancellations.push(reason),
+    model: { select: selection => selections.push({ ...selection }) },
+    whenIdle: () => control?.blockMax ? new Promise(() => {}) : Promise.resolve(),
+    inject(message) { injections.push(message); },
     steer(message) { turns.push(message); sessionEvents.push({ type: 'turn/end', data: { reason: { kind: 'completed' } } }); } };
   const ctx = {
     workspaceRegistry: { create: async () => ({ id: 'test-workspace' }) },
     sessionController: { create: async () => ({ sessionId: parent.id }), resolveAgent: async () => ({ agent: parent }) },
-    agents: { get: () => parent }, effect() {},
+    agents: { get: () => parent }, subagents: { interrupt: (...args) => childInterruptions.push(args) }, effect() {},
     on(type, fn) { if (type === 'dispose') dispose = fn; }, llm: { stream },
   };
   const token = 'synthetic-test-token';
   const readyFile = join(dir, 'ready.json');
+  let providerConfig = control?.providerConfig ?? (control ? { kind: 'composed', instance: control.provider } : undefined);
+  const stateFile = join(dir, 'fixture-state.json');
+  if (control?.miioFixture) {
+    await mkdir(join(dir, 'server/data'), { recursive: true });
+    const did = '123456789';
+    await writeFile(join(dir, 'server/data/xiaomi-tokens.json'), JSON.stringify([{ homes: [{
+      home_id: randomUUID() + '3625', devices: [{ model: 'yeelink.light.lamp27', did,
+        localip: '127.0.0.1', token: 'synthetic-fixture-token' }],
+    }] }]));
+    await writeFile(stateFile, JSON.stringify({ power: true }));
+    providerConfig = { kind: 'miio-lamp', enabled: true, mode: 'execute', allowWrite: true,
+      cooperativeControlReady: true, python: process.env.VOICE_CONTROL_TEST_PYTHON ?? 'python',
+      workspace: dir, fixture: stateFile, expectedLampHash: createHash('sha256').update(did).digest('hex').slice(0, 16),
+      operationLimitMs: 1000, startupTimeoutMs: 1000, closeTimeoutMs: 1000 };
+  }
   await apply(ctx, { token, readyFile, cwd: dir, supervisorReasoningEffort: 'max',
-    quick: { contextChars: 1200, inputChars: 600, maxTokens: 64, maxChars: 30, timeoutMs, capacity: 4 } });
+    quick: { contextChars: 1200, inputChars: 600, maxTokens: 64, maxChars: 30, timeoutMs, capacity: options.quickCapacity ?? 4,
+      cancelGraceMs: 10, maxOutstanding: 2 },
+    simpleControl: control ? { enabled: control.enabled ?? true, budgetMs: 1000, capacity: control.capacity ?? 30,
+      provider: providerConfig } : undefined });
   const { port } = JSON.parse(await readFile(readyFile, 'utf8'));
-  const api = async (path, input) => {
-    const response = await fetch(`http://127.0.0.1:${port}${path}`, {
-      method: input === undefined ? 'GET' : 'POST', headers: { authorization: `Bearer ${token}` },
+  const apiRaw = (path, input, headers = {}) => fetch(`http://127.0.0.1:${port}${path}`, {
+      method: input === undefined ? 'GET' : 'POST', headers: { authorization: `Bearer ${token}`, ...headers },
       body: input === undefined ? undefined : JSON.stringify(input),
     });
+  const api = async (path, input) => {
+    const response = await apiRaw(path, input);
     assert.ok(response.ok, 'Local fixture API failed: ' + response.status);
     return response.json();
   };
+  const readRows = async () => (await readFile(join(dir, 'quick-requests.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse);
+  if (!probe) return { api, request: apiRaw, selections, turns, readRows, parentCancellations, childInterruptions };
   const response = await fetch(`http://127.0.0.1:${port}/quick-probe`, {
     method: 'POST', headers: { authorization: `Bearer ${token}` }, body: '{}',
   });
@@ -45,8 +72,147 @@ async function fixture(t, stream, timeoutMs = 500) {
   const rows = (await readFile(join(dir, 'quick-requests.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
   const diagnostics = rows.filter(row => row.kind === 'quick.diagnostics');
   assert.equal(diagnostics.length, 1);
-  return { status: response.status, body, diagnostic: diagnostics[0], api, selections, turns };
+  return { status: response.status, body, diagnostic: diagnostics[0], api, apiRaw, selections, turns, injections,
+    providerState: async () => JSON.parse(await readFile(stateFile, 'utf8')),
+    close: async () => { const owned = dispose; dispose = undefined; await owned(); } };
 }
+
+test('real plugin factory controls its private fixture while Max remains unavailable', async t => {
+  const result = await fixture(t, async function* () { yield { type: 'text-delta', text: '好的，我来处理。' }; },
+    500, { miioFixture: true, blockMax: true });
+  assert.equal((await result.providerState()).writes, undefined);
+  await result.api('/prompt', { requestId: 'configured-miio', voiceSessionId: 'fixture-voice', text: '关灯' });
+  const deadline = performance.now() + 2000;
+  let state;
+  while ((state = await result.api('/state')).controls[0]?.status !== 'verified') {
+    assert.ok(performance.now() < deadline); await delay(5);
+  }
+  const projected = traceState(state);
+  assert.equal(projected.controls[0].commandId, 'configured-miio');
+  assert.equal(projected.controls[0].voiceSessionId, 'fixture-voice');
+  assert.equal(projected.controlProjection.sourceInstance, state.controlSourceInstance);
+  assert.ok(projected.controlProjection.sequence > 0);
+  assert.equal((await result.providerState()).writes, 1);
+  assert.equal(result.turns.length, 0);
+});
+
+test('disabled control configuration never constructs even an invalid broker provider', async t => {
+  const result = await fixture(t, async function* () { yield { type: 'text-delta', text: '好的。' }; },
+    500, { enabled: false, providerConfig: { kind: 'miio-lamp', enabled: true } });
+  const state = await result.api('/state');
+  assert.deepEqual(state.controls, []); assert.equal(state.controlSourceInstance, undefined);
+});
+
+test('authenticated exact command inspection survives bounded snapshots without any new action', async t => {
+  let power = true, writes = 0, queries = 0;
+  const provider = {
+    resolve: () => ({ approved: true, unique: true, homeSuffix: '3625', resourceId: 'fixture-lamp', properties: ['power'] }),
+    async write(intent) { writes++; power = intent.value; },
+    async readFresh(_intent, context) { queries++; return { resourceId: 'fixture-lamp', fresh: true,
+      queryId: context.queryId, properties: { power } }; },
+  };
+  const result = await fixture(t, async function* () { yield { type: 'text-delta', text: '好的，我来处理。' }; },
+    500, { provider, capacity: 1, blockMax: true });
+  for (let i = 0; i < 3; i++) {
+    await result.api('/prompt', { requestId: 'inspect-' + i, voiceSessionId: 'voice-' + i, text: '关灯' });
+    const deadline = performance.now() + 1000;
+    while ((await result.api('/state')).controls.find(c => c.commandId === 'inspect-' + i)?.status !== 'verified') {
+      assert.ok(performance.now() < deadline); await delay(5);
+    }
+  }
+  const state = await result.api('/state');
+  assert.equal(state.controls.length, 1); assert.equal(state.controlStats.activeAdmissions, 0);
+  const stored = await result.api('/control-result?commandId=inspect-0');
+  assert.equal(stored.found, true); assert.equal(stored.control.commandId, 'inspect-0');
+  assert.equal(stored.control.voiceSessionId, 'voice-0'); assert.equal(stored.control.goalVersion, 1);
+  assert.equal(stored.control.currentGoal, false); assert.equal(writes, 3); assert.equal(queries, 3);
+  if (process.env.VOICE_CONTROL_CONTRACT_OUT) {
+    await writeFile(process.env.VOICE_CONTROL_CONTRACT_OUT, JSON.stringify(stored));
+  }
+  assert.equal((await result.api('/control-result?commandId=not-known')).found, false);
+  for (const path of ['/control-result', '/control-result?commandId=a&commandId=b', '/control-result?commandId=../secret']) {
+    assert.equal((await result.apiRaw(path)).status, 400);
+  }
+  assert.equal((await result.apiRaw('/control-result?commandId=inspect-0', undefined, { authorization: 'Bearer wrong' })).status, 403);
+  assert.equal(writes, 3); assert.equal(queries, 3); assert.equal(result.turns.length, 0);
+});
+
+test('a provider cleanup error is reported after the plugin HTTP listener is closed', async t => {
+  const provider = { resolve: () => ({ unsupported: true }), async write() {}, async readFresh() {},
+    async close() { throw new Error('fixture-provider-close'); } };
+  const result = await fixture(t, async function* () { yield { type: 'text-delta', text: '好的。' }; }, 500, { provider });
+  await assert.rejects(result.close(), error => error instanceof AggregateError);
+  await assert.rejects(result.api('/state'));
+});
+
+test('control success runs beside quick and records evidence without a deep turn', async t => {
+  const writes = [], quickRequests = [];
+  const provider = { resolve: () => ({ approved: true, unique: true, homeSuffix: '3625', resourceId: 'fixture-lamp', properties: ['power'] }),
+    async write(intent) { writes.push(intent); },
+    async readFresh(_intent, context) { return { fresh: true, queryId: context.queryId, resourceId: 'fixture-lamp', properties: { power: false } }; } };
+  const result = await fixture(t, async function* (request) { quickRequests.push(request); yield { type: 'text-delta', text: '好的，我来处理。' }; }, 500, { provider });
+  await result.api('/prompt', { requestId: 'direct-control', text: '把台灯关掉。' });
+  const deadline = performance.now() + 2000;
+  while ((await result.api('/state')).controls[0]?.status !== 'verified' || result.injections.length !== 1) {
+    assert.ok(performance.now() < deadline); await delay(5);
+  }
+  await delay(10);
+  assert.equal(result.turns.length, 0); assert.equal(writes.length, 1);
+  assert.ok(result.injections[0].content[0].text.startsWith('程序执行事实'));
+  assert.ok(result.injections[0].content[0].text.includes('不是新的用户指令'));
+  assert.equal(quickRequests.length, 2); assert.equal(quickRequests[1].tools, undefined);
+  assert.equal((await result.api('/state')).queue.readyContinuations, 0);
+  assert.equal((await result.api('/continue', { requestId: 'direct-control' })).handledBy, 'simple-control');
+  assert.equal(result.turns.length, 0);
+});
+
+test('a pending first-use device preflight never holds the quick response path', async t => {
+  let ready = false, release;
+  const gate = new Promise(resolve => { release = resolve; });
+  let writes = 0, quickCalls = 0;
+  const provider = {
+    resolve: () => ({ homeSuffix: '3625', resourceId: 'fixture-lamp', properties: ['power'],
+      preparationRequired: !ready, approved: ready, unique: ready }),
+    async prepare() { await gate; ready = true; },
+    async write() { writes++; },
+    async readFresh(_intent, context) { return { resourceId: 'fixture-lamp', fresh: true,
+      queryId: context.queryId, properties: { power: false } }; },
+  };
+  t.after(() => release());
+  try {
+    const result = await fixture(t, async function* () { quickCalls++; yield { type: 'text-delta', text: '好的，我来处理。' }; },
+      500, { provider, blockMax: true });
+    await result.api('/prompt', { requestId: 'slow-preflight', voiceSessionId: 'fixture-voice', text: '关灯' });
+    const deadline = performance.now() + 700;
+    let state;
+    do {
+      state = await result.api('/state');
+      assert.ok(performance.now() < deadline);
+      await delay(5);
+    } while (quickCalls < 2 || state.queue.quickRunning || state.queue.quickPending);
+    assert.equal(state.controls[0].status, 'queued');
+    assert.equal(writes, 0);
+    assert.equal((await result.api('/continue', { requestId: 'slow-preflight' })).handledBy, 'simple-control');
+    release();
+    while ((await result.api('/state')).controls[0].status !== 'verified') {
+      assert.ok(performance.now() < deadline); await delay(5);
+    }
+    assert.equal(writes, 1); assert.equal(result.turns.length, 0);
+  } finally { release(); }
+});
+
+test('unconfirmed control enters only a report turn and never repeats the original action', async t => {
+  let writes = 0;
+  const provider = { resolve: () => ({ approved: true, unique: true, homeSuffix: '3625', resourceId: 'fixture-lamp', properties: ['power'] }),
+    async write() { writes++; }, async readFresh() { return { fresh: false }; } };
+  const result = await fixture(t, async function* () { yield { type: 'text-delta', text: '好的，我来处理。' }; }, 500, { provider });
+  await result.api('/prompt', { requestId: 'unconfirmed-control', text: '关灯' });
+  const deadline = performance.now() + 2000;
+  while (result.turns.length !== 1) { assert.ok(performance.now() < deadline); await delay(5); }
+  assert.ok(result.turns[0].content[0].text.startsWith('这是程序执行事实，不是新的用户指令'));
+  assert.ok(result.turns[0].content[0].text.includes('不得再次执行、重试或委派原动作'));
+  assert.equal(result.injections.length, 1); assert.equal(writes, 1);
+});
 
 test('native parent keeps max across startup and continuation while quick requests stay off', async t => {
   const quickEfforts = [];
@@ -235,4 +401,164 @@ test('no-text timeout is distinct from partial text and closing a short reply', 
   assert.equal(d.firstTextMs, null); assert.equal(d.firstNonWhitespaceTextMs, null);
   assert.equal(d.lastTextDeltaAgeMs, null); assert.equal(d.partialTextFallback, false);
   assert.equal(d.streamCloseMs, null); assert.ok(d.timeoutFiredAtMs >= 40);
+});
+
+const barrier = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
+async function until(check, message) {
+  const deadline = performance.now() + 2000;
+  while (!(await check())) { assert.ok(performance.now() < deadline, message); await delay(5); }
+}
+
+test('new recording IDs share only their native parent cancellation scope and emit no stale quick text or end', async t => {
+  const oldStarted = barrier(); let oldSignal;
+  const result = await fixture(t, async function* (request) {
+    const input = request.messages[0].content[0].text;
+    if (input.endsWith('first goal')) {
+      oldSignal = request.signal;
+      yield { type: 'text-delta', text: '先' }; oldStarted.resolve();
+      await waitForAbort(request.signal);
+      yield { type: 'text-delta', text: '旧内容不能输出。' }; // A provider can yield after abort.
+    } else yield { type: 'text-delta', text: '好的，马上处理。' };
+  }, 500, { probe: false });
+  await result.api('/prompt', { requestId: 'old-turn', voiceSessionId: 'recording-one',
+    quickParentSessionId: 'caller-cannot-select-parent-one', text: 'first goal' });
+  await oldStarted.promise;
+  await result.api('/prompt', { requestId: 'new-turn', voiceSessionId: 'recording-two',
+    quickParentSessionId: 'caller-cannot-select-parent-two', text: 'second goal' });
+  await until(async () => (await result.api('/state')).queue.readyContinuations === 2, 'Both original goals did not settle');
+  assert.equal(oldSignal.aborted, true);
+  const { events } = await result.api('/events?after=0');
+  const accepted = events.find(event => event.type === 'prompt.accepted' && event.data.requestId === 'new-turn');
+  assert.ok(!events.some(event => event.sequence > accepted.sequence && event.data?.owner?.requestId === 'old-turn'
+    && ['speech.delta', 'quick.completed'].includes(event.type)));
+  assert.ok(events.some(event => event.type === 'quick.superseded' && event.data.owner.requestId === 'old-turn'));
+  const rows = await result.readRows();
+  assert.ok(!rows.some(row => row.kind === 'quick.reply' && row.requestId === 'old-turn'));
+  const diagnostic = rows.find(row => row.kind === 'quick.diagnostics' && row.requestId === 'old-turn');
+  assert.equal(diagnostic.outcome, 'superseded'); assert.equal(diagnostic.partialTextFallback, false);
+  assert.equal(diagnostic.spokenTextChars, 1); // No fabricated punctuation for the superseded half-clause.
+  assert.ok(rows.filter(row => row.kind === 'quick.admitted').every(row => row.job.quickParentSessionId === 'test-parent'));
+  await result.api('/continue', { requestId: 'old-turn' });
+  await result.api('/continue', { requestId: 'new-turn' });
+  await until(async () => (await result.api('/state')).queue.phase === 'idle', 'Deep continuation did not settle');
+  const inputs = result.turns.flatMap(turn => JSON.parse(turn.content[0].text.split('\n').at(-1)));
+  assert.ok(inputs.some(input => input.input === 'first goal' && input.quickReply === ''));
+  assert.ok(inputs.some(input => input.input === 'second goal' && input.quickReply === '好的，马上处理。'));
+  assert.deepEqual(result.parentCancellations, []); assert.deepEqual(result.childInterruptions, []);
+});
+
+test('a completed old sentence whose return ignores abort cannot delay or publish over the new quick', async t => {
+  const cleanupStarted = barrier(), releaseCleanup = barrier(); let oldSignal;
+  const result = await fixture(t, request => {
+    if (request.messages[0].content[0].text.endsWith('old cleanup')) {
+      oldSignal = request.signal;
+      return { [Symbol.asyncIterator]() { return this; },
+        async next() { return { done: false, value: { type: 'text-delta', text: '旧句。' } }; },
+        async return() { cleanupStarted.resolve(); await releaseCleanup.promise; return { done: true }; } };
+    }
+    return (async function* () { yield { type: 'text-delta', text: '现在处理。' }; })();
+  }, 500, { probe: false });
+  try {
+    await result.api('/prompt', { requestId: 'old-cleanup', text: 'old cleanup' }); await cleanupStarted.promise;
+    await result.api('/prompt', { requestId: 'latest-cleanup', text: 'latest cleanup' });
+    await until(async () => (await result.api('/state')).queue.readyContinuations === 2, 'New quick remained behind old iterator.return');
+    assert.equal(oldSignal.aborted, true);
+    let rows = await result.readRows();
+    assert.ok(rows.some(row => row.kind === 'quick.reply' && row.requestId === 'latest-cleanup'));
+    assert.ok(!rows.some(row => row.kind === 'quick.reply' && row.requestId === 'old-cleanup'));
+    releaseCleanup.resolve();
+    await until(async () => (await result.api('/state')).queue.quickOutstanding === 0, 'Owned iterator did not quiesce');
+    rows = await result.readRows();
+    assert.ok(!rows.some(row => row.kind === 'quick.reply' && row.requestId === 'old-cleanup'));
+    const { events } = await result.api('/events?after=0');
+    assert.ok(!events.some(event => event.type === 'quick.completed' && event.data.owner.requestId === 'old-cleanup'));
+    assert.ok(events.some(event => event.type === 'quick.cleanup_pending'));
+  } finally { releaseCleanup.resolve(); }
+});
+
+test('separate native parent instances keep their provider signals independent', async t => {
+  const firstStarted = barrier(), secondStarted = barrier(), releaseSecond = barrier(); let firstSignal, secondSignal;
+  const first = await fixture(t, async function* (request) {
+    if (request.messages[0].content[0].text.endsWith('hold first')) {
+      firstSignal = request.signal; firstStarted.resolve(); await waitForAbort(request.signal);
+      throw Object.assign(new Error('cancelled'), { name: 'AbortError' });
+    }
+    yield { type: 'text-delta', text: '第一会话。' };
+  }, 500, { probe: false, parentId: 'parent-one' });
+  const second = await fixture(t, async function* (request) {
+    secondSignal = request.signal; secondStarted.resolve(); await releaseSecond.promise;
+    yield { type: 'text-delta', text: '第二会话。' };
+  }, 500, { probe: false, parentId: 'parent-two' });
+  try {
+    await first.api('/prompt', { requestId: 'one', text: 'hold first' }); await firstStarted.promise;
+    await second.api('/prompt', { requestId: 'two', text: 'hold second' }); await secondStarted.promise;
+    await first.api('/prompt', { requestId: 'one-new', text: 'new first' });
+    await until(async () => (await first.api('/state')).queue.readyContinuations === 2, 'First scope did not settle');
+    assert.equal(firstSignal.aborted, true); assert.equal(secondSignal.aborted, false);
+  } finally { releaseSecond.resolve(); }
+});
+
+test('invalid cleanup budgets fail before creating any native parent', async () => {
+  let created = 0;
+  const ctx = { workspaceRegistry: { create() { created++; throw new Error('unexpected workspace creation'); } } };
+  const quick = { contextChars: 1200, inputChars: 600, maxTokens: 64, maxChars: 30,
+    timeoutMs: 100, capacity: 4, cancelGraceMs: 10, maxOutstanding: 2 };
+  for (const overrides of [{ cancelGraceMs: 0 }, { cancelGraceMs: 101 }, { maxOutstanding: 3 }, { maxOutstanding: 0 }]) {
+    await assert.rejects(apply(ctx, { token: 'synthetic', readyFile: 'unused', cwd: 'unused',
+      supervisorReasoningEffort: 'max', quick: { ...quick, ...overrides } }), /quick[. ]/);
+  }
+  assert.equal(created, 0);
+});
+
+test('HTTP diagnostics reject overlap and their unresolved provider shares the real quick budget', async t => {
+  const started = barrier(), release = barrier(); let probeSignal, calls = 0;
+  const result = await fixture(t, async function* (request) {
+    calls++;
+    if (request.messages[0].content[0].text.endsWith('你好，现在能听到吗？')) {
+      probeSignal = request.signal; started.resolve(); await release.promise;
+      yield { type: 'text-delta', text: 'obsolete probe text' };
+    } else yield { type: 'text-delta', text: '处理本轮。' };
+  }, 500, { probe: false });
+  const pendingProbe = result.request('/quick-probe', {});
+  try {
+    await started.promise;
+    assert.equal((await result.request('/quick-probe', {})).status, 409);
+    await result.api('/prompt', { requestId: 'real-with-probe', text: 'real input' });
+    await until(async () => (await result.api('/state')).queue.readyContinuations === 1, 'Diagnostic blocked real quick');
+    assert.equal(probeSignal.aborted, true); assert.equal(calls, 2);
+    const state = await result.api('/state');
+    assert.equal(state.queue.quickProbeRunning, true); assert.equal(state.queue.quickOutstanding, 1);
+    assert.equal((await result.request('/quick-probe', {})).status, 409);
+    release.resolve(); assert.equal((await pendingProbe).status, 400);
+    await until(async () => (await result.api('/state')).queue.quickOutstanding === 0, 'Diagnostic cleanup did not settle');
+  } finally { release.resolve(); await pendingProbe; }
+});
+
+test('a full ordinary handoff cannot consume the independent bounded control admission', async t => {
+  const readStarted = barrier(), releaseRead = barrier(); let writes = 0;
+  const provider = { resolve: intent => intent.target === 'lamp' && intent.property === 'power'
+    ? { approved: true, unique: true, homeSuffix: '3625', resourceId: 'fixture-lamp', properties: ['power'] }
+    : { unsupported: true },
+    async write() { writes++; },
+    async readFresh(_intent, context) { readStarted.resolve(); await releaseRead.promise;
+      return { resourceId: 'fixture-lamp', queryId: context.queryId, fresh: true, properties: { power: false } }; } };
+  const result = await fixture(t, async function* () { yield { type: 'text-delta', text: '好的，我来处理。' }; },
+    500, { provider, capacity: 1, blockMax: true });
+  try {
+    for (let i = 0; i < 4; i++) {
+      await result.api('/prompt', { requestId: 'ordinary-full-' + i, text: '公开的普通研究目标' + i });
+      await until(async () => (await result.api('/state')).queue.readyContinuations === i + 1, 'Ordinary queue did not fill');
+    }
+    const control = await result.apiRaw('/prompt', { requestId: 'independent-control', voiceSessionId: 'independent-voice', text: '关灯' });
+    assert.equal(control.status, 202, 'Full ordinary handoff rejected independently bounded control');
+    await readStarted.promise;
+    assert.equal((await result.apiRaw('/prompt', { requestId: 'control-over-capacity', text: '开灯' })).status, 503);
+    assert.equal((await result.apiRaw('/prompt', { requestId: 'unsupported-still-full', text: '开风扇' })).status, 503);
+    assert.equal((await result.apiRaw('/prompt', { requestId: 'ordinary-over-capacity', text: '另一个公开研究目标' })).status, 503);
+    assert.equal(writes, 1); releaseRead.resolve();
+    await until(async () => (await result.api('/state')).controls[0]?.status === 'verified', 'Control did not settle');
+    const state = await result.api('/state');
+    assert.equal(state.controlStats.activeAdmissions, 0); assert.equal(state.controls.length, 1);
+    assert.equal(state.queue.readyContinuations, 4); assert.equal(result.turns.length, 0);
+  } finally { releaseRead.resolve(); }
 });

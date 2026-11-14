@@ -10,6 +10,7 @@ import { nativeTrace, traceState } from './trace.mjs';
 import { SpeechEvents } from './speech-events.mjs';
 import { runtimeHealth } from './health.mjs';
 import { RotatingLog } from './rotating-log.mjs';
+import { controlSnapshot, controlView, controlQuery } from './control-view.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '../..');
@@ -39,6 +40,7 @@ const player = new PlaybackQueue({ charsPerSecond: 9 });
 const messages = [], metrics = [], requests = new Map(), attempts = new Map();
 const traces = [], childOwners = new Map();
 const speechEvents = new SpeechEvents();
+const controlEvents = new SpeechEvents();
 let activeSpeechId;
 let traceSequence = existsSync(join(runDir, 'trace.jsonl')) ? readFileSync(join(runDir, 'trace.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line).sequence).at(-1) ?? 0 : 0;
 function trace(event, owner = current) {
@@ -57,7 +59,7 @@ function continueDeep(owner) {
 }
 function message(role, text, owner = current, extra = {}) { const item = { role, text, at: Date.now(), requestId: owner?.id ?? owner?.requestId, ...extra }; messages.push(item); appendFileSync(join(runDir, 'speech-outbox.jsonl'), JSON.stringify(item) + '\n'); }
 harness.on('exit', (code, signal) => {
-  exited = true; lastError = `Harness stopped (${code ?? signal})`; speechEvents.close();
+  exited = true; lastError = `Harness stopped (${code ?? signal})`; speechEvents.close(); controlEvents.close();
   if (runtimeStarted) void shutdown(1);
 });
 async function api(path, body) {
@@ -85,6 +87,14 @@ const poller = setInterval(async () => {
     for (const e of batch.events) {
       const suppliedOwner = e.data?.owner;
       const eventOwner = suppliedOwner ? requests.get(suppliedOwner.requestId) ?? { id: suppliedOwner.requestId, voiceSessionId: suppliedOwner.voiceSessionId } : current;
+      if (e.type === 'control.state') {
+        const fact = controlView(e.data);
+        if (!fact) continue;
+        const controlOwner = requests.get(e.data.commandId) ?? { id: e.data.commandId, voiceSessionId: e.data.voiceSessionId };
+        controlEvents.push({ ...fact, kind: 'control.state', at: e.time });
+        nativeState.controls = [...(nativeState.controls ?? []).filter(item => item.commandId !== fact.commandId), fact].slice(-256);
+        trace({ at: e.time, kind: 'control.' + fact.status, actor: '程序控制', title: '设备控制状态', details: fact }, controlOwner);
+      }
       if (e.type === 'stage' || e.type === 'phase') {
         trace({ at: e.time, kind: e.type === 'stage' && e.data.kind === 'input.queued' ? 'input.queued' : 'scheduler.phase',
           actor: '主调度器', title: e.type === 'phase' ? '主调度阶段更新' : '输入队列更新', details: e.data },
@@ -124,14 +134,19 @@ const poller = setInterval(async () => {
         message('快速接话', e.data.text, eventOwner, { messageId: e.data.messageId, phase: 'quick' });
         if (eventOwner?.epoch === player.epoch) player.offer({ turnId: eventOwner.id, role: 'intro', text: e.data.text, epoch: eventOwner.epoch });
         trace({ at: Date.now(), kind: 'front.forwarded', actor: '快速接话', title: '接话已转发语音通道，放行深度续接', details: { forwardDelayMs: Date.now() - e.time } }, eventOwner);
-        continueDeep(eventOwner);
+        if (!e.data.owner?.controlHandled) continueDeep(eventOwner);
       }
       if (e.type === 'quick.aborted') speechEvents.push({ kind: 'abort', outputId: e.data.attemptId });
+      if (e.type === 'quick.superseded') {
+        trace({ at: e.time, kind: 'front.superseded', actor: '快速接话', title: '过时接话已取消，原始需求仍交主调度',
+          details: { supersededBy: e.data.supersededBy } }, eventOwner);
+        continueDeep(eventOwner);
+      }
       if (e.type === 'quick.failed' || e.type === 'quick.continuation_failed') {
         const text = e.type === 'quick.failed' ? '快速接话失败，主调度继续处理。' : '任务未能进入主调度队列，请检查运行日志。';
         trace({ at: e.time, kind: 'front.error', actor: '快速接话', title: text, details: { errorType: e.data.errorType } }, eventOwner);
         message('错误', text, eventOwner);
-        if (e.type === 'quick.failed') continueDeep(eventOwner);
+        if (e.type === 'quick.failed' && !e.data.owner?.controlHandled) continueDeep(eventOwner);
       }
       if (e.type === 'child.started') childOwners.set(e.data.id, eventOwner);
       const projected = nativeTrace(e, sessionId);
@@ -203,8 +218,15 @@ const server = createServer(async (req, res) => {
         gap: traces.length > 0 && after > 0 && after < traces[0].sequence - 1 });
     }
     if (req.method === 'GET' && url.pathname === '/speech-events') return speechEvents.subscribe(Number(url.searchParams.get('after') ?? 0), res);
+    if (req.method === 'GET' && url.pathname === '/control-events') return controlEvents.subscribe(Number(url.searchParams.get('after') ?? 0), res);
+    if (req.method === 'GET' && url.pathname === '/control-result') {
+      let commandId;
+      try { commandId = controlQuery(url.searchParams); }
+      catch { return respond(400, { error: 'Exactly one valid commandId is required' }); }
+      return respond(200, await api('/control-result?commandId=' + encodeURIComponent(commandId)));
+    }
     if (req.method === 'GET' && url.pathname === '/state') return respond(200, { messages, metrics, speechProtocol: 2, speechSequence: speechEvents.sequence, delivery: player.delivery(),
-      playing: player.playing?.id, nativeState, lastError, alive: !exited, busy: busy > 0, workspace: fixture });
+      playing: player.playing?.id, ...controlSnapshot(nativeState), nativeState, lastError, alive: !exited, busy: busy > 0, workspace: fixture });
     if (req.method !== 'POST') return respond(404, { error: 'Not found' });
     const chunks = []; let bytes = 0;
     for await (const chunk of req) { bytes += chunk.length; if (bytes > 16384) return respond(413, { error: 'Input too large' }); chunks.push(chunk); }
@@ -240,7 +262,7 @@ if (exited) void shutdown(1);
 async function shutdown(exitCode = 0) {
   if (stopping) return; stopping = true; clearInterval(timer); clearInterval(poller);
   writeFileSync(join(runDir, 'interactive-result.json'), JSON.stringify({ messages, metrics, playback: player.delivery() }, null, 2));
-  speechEvents.close();
+  speechEvents.close(); controlEvents.close();
   server.closeAllConnections(); server.close();
   await stopHarness();
   process.exit(exitCode);
