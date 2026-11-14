@@ -10,6 +10,7 @@ import { nativeTrace, traceState } from './trace.mjs';
 import { SpeechEvents } from './speech-events.mjs';
 import { runtimeHealth } from './health.mjs';
 import { RotatingLog } from './rotating-log.mjs';
+import { controlSnapshot, controlView } from './control-view.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '../..');
@@ -87,9 +88,12 @@ const poller = setInterval(async () => {
       const suppliedOwner = e.data?.owner;
       const eventOwner = suppliedOwner ? requests.get(suppliedOwner.requestId) ?? { id: suppliedOwner.requestId, voiceSessionId: suppliedOwner.voiceSessionId } : current;
       if (e.type === 'control.state') {
+        const fact = controlView(e.data);
+        if (!fact) continue;
         const controlOwner = requests.get(e.data.commandId) ?? { id: e.data.commandId, voiceSessionId: e.data.voiceSessionId };
-        controlEvents.push({ ...e.data, kind: 'control.state', requestId: e.data.commandId, origin: 'program-control', at: e.time });
-        trace({ at: e.time, kind: 'control.' + e.data.status, actor: '程序控制', title: '设备控制状态', details: e.data }, controlOwner);
+        controlEvents.push({ ...fact, kind: 'control.state', at: e.time });
+        nativeState.controls = [...(nativeState.controls ?? []).filter(item => item.commandId !== fact.commandId), fact].slice(-256);
+        trace({ at: e.time, kind: 'control.' + fact.status, actor: '程序控制', title: '设备控制状态', details: fact }, controlOwner);
       }
       if (e.type === 'stage' || e.type === 'phase') {
         trace({ at: e.time, kind: e.type === 'stage' && e.data.kind === 'input.queued' ? 'input.queued' : 'scheduler.phase',
@@ -211,7 +215,7 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/speech-events') return speechEvents.subscribe(Number(url.searchParams.get('after') ?? 0), res);
     if (req.method === 'GET' && url.pathname === '/control-events') return controlEvents.subscribe(Number(url.searchParams.get('after') ?? 0), res);
     if (req.method === 'GET' && url.pathname === '/state') return respond(200, { messages, metrics, speechProtocol: 2, speechSequence: speechEvents.sequence, delivery: player.delivery(),
-      playing: player.playing?.id, controls: nativeState.controls ?? [], nativeState, lastError, alive: !exited, busy: busy > 0, workspace: fixture });
+      playing: player.playing?.id, ...controlSnapshot(nativeState), nativeState, lastError, alive: !exited, busy: busy > 0, workspace: fixture });
     if (req.method !== 'POST') return respond(404, { error: 'Not found' });
     const chunks = []; let bytes = 0;
     for await (const chunk of req) { bytes += chunk.length; if (bytes > 16384) return respond(413, { error: 'Input too large' }); chunks.push(chunk); }

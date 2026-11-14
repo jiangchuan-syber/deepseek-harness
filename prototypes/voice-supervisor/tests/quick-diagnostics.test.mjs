@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { apply } from '../plugin.mjs';
+import { traceState } from '../trace.mjs';
 
 async function fixture(t, stream, timeoutMs = 500, control = null) {
   const dir = await mkdtemp(join(tmpdir(), 'voice-quick-diagnostics-'));
@@ -17,20 +19,37 @@ async function fixture(t, stream, timeoutMs = 500, control = null) {
   });
   const selections = [], turns = [], injections = [], sessionEvents = [];
   const parent = { id: 'test-parent', status: 'idle', session: { snapshotEvents: () => sessionEvents }, cancel() {},
-    model: { select: selection => selections.push({ ...selection }) }, whenIdle: async () => {},
+    model: { select: selection => selections.push({ ...selection }) },
+    whenIdle: () => control?.blockMax ? new Promise(() => {}) : Promise.resolve(),
     inject(message) { injections.push(message); },
     steer(message) { turns.push(message); sessionEvents.push({ type: 'turn/end', data: { reason: { kind: 'completed' } } }); } };
   const ctx = {
     workspaceRegistry: { create: async () => ({ id: 'test-workspace' }) },
     sessionController: { create: async () => ({ sessionId: parent.id }), resolveAgent: async () => ({ agent: parent }) },
     agents: { get: () => parent }, effect() {},
-    on(type, fn) { if (type === 'dispose') dispose = fn; }, llm: { stream }, voiceDeviceControl: control?.provider,
+    on(type, fn) { if (type === 'dispose') dispose = fn; }, llm: { stream },
   };
   const token = 'synthetic-test-token';
   const readyFile = join(dir, 'ready.json');
+  let providerConfig = control?.providerConfig ?? (control ? { kind: 'composed', instance: control.provider } : undefined);
+  const stateFile = join(dir, 'fixture-state.json');
+  if (control?.miioFixture) {
+    await mkdir(join(dir, 'server/data'), { recursive: true });
+    const did = '123456789';
+    await writeFile(join(dir, 'server/data/xiaomi-tokens.json'), JSON.stringify([{ homes: [{
+      home_id: randomUUID() + '3625', devices: [{ model: 'yeelink.light.lamp27', did,
+        localip: '127.0.0.1', token: 'synthetic-fixture-token' }],
+    }] }]));
+    await writeFile(stateFile, JSON.stringify({ power: true }));
+    providerConfig = { kind: 'miio-lamp', enabled: true, mode: 'execute', allowWrite: true,
+      cooperativeControlReady: true, python: process.env.VOICE_CONTROL_TEST_PYTHON ?? 'python',
+      workspace: dir, fixture: stateFile, expectedLampHash: createHash('sha256').update(did).digest('hex').slice(0, 16),
+      operationLimitMs: 1000, startupTimeoutMs: 1000, closeTimeoutMs: 1000 };
+  }
   await apply(ctx, { token, readyFile, cwd: dir, supervisorReasoningEffort: 'max',
     quick: { contextChars: 1200, inputChars: 600, maxTokens: 64, maxChars: 30, timeoutMs, capacity: 4 },
-    simpleControl: control ? { enabled: true, budgetMs: 1000, capacity: 30 } : undefined });
+    simpleControl: control ? { enabled: control.enabled ?? true, budgetMs: 1000, capacity: 30,
+      provider: providerConfig } : undefined });
   const { port } = JSON.parse(await readFile(readyFile, 'utf8'));
   const api = async (path, input) => {
     const response = await fetch(`http://127.0.0.1:${port}${path}`, {
@@ -47,8 +66,44 @@ async function fixture(t, stream, timeoutMs = 500, control = null) {
   const rows = (await readFile(join(dir, 'quick-requests.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
   const diagnostics = rows.filter(row => row.kind === 'quick.diagnostics');
   assert.equal(diagnostics.length, 1);
-  return { status: response.status, body, diagnostic: diagnostics[0], api, selections, turns, injections };
+  return { status: response.status, body, diagnostic: diagnostics[0], api, selections, turns, injections,
+    providerState: async () => JSON.parse(await readFile(stateFile, 'utf8')),
+    close: async () => { const owned = dispose; dispose = undefined; await owned(); } };
 }
+
+test('real plugin factory controls its private fixture while Max remains unavailable', async t => {
+  const result = await fixture(t, async function* () { yield { type: 'text-delta', text: '好的，我来处理。' }; },
+    500, { miioFixture: true, blockMax: true });
+  assert.equal((await result.providerState()).writes, undefined);
+  await result.api('/prompt', { requestId: 'configured-miio', voiceSessionId: 'fixture-voice', text: '关灯' });
+  const deadline = performance.now() + 2000;
+  let state;
+  while ((state = await result.api('/state')).controls[0]?.status !== 'verified') {
+    assert.ok(performance.now() < deadline); await delay(5);
+  }
+  const projected = traceState(state);
+  assert.equal(projected.controls[0].commandId, 'configured-miio');
+  assert.equal(projected.controls[0].voiceSessionId, 'fixture-voice');
+  assert.equal(projected.controlProjection.sourceInstance, state.controlSourceInstance);
+  assert.ok(projected.controlProjection.sequence > 0);
+  assert.equal((await result.providerState()).writes, 1);
+  assert.equal(result.turns.length, 0);
+});
+
+test('disabled control configuration never constructs even an invalid broker provider', async t => {
+  const result = await fixture(t, async function* () { yield { type: 'text-delta', text: '好的。' }; },
+    500, { enabled: false, providerConfig: { kind: 'miio-lamp', enabled: true } });
+  const state = await result.api('/state');
+  assert.deepEqual(state.controls, []); assert.equal(state.controlSourceInstance, undefined);
+});
+
+test('a provider cleanup error is reported after the plugin HTTP listener is closed', async t => {
+  const provider = { resolve: () => ({ unsupported: true }), async write() {}, async readFresh() {},
+    async close() { throw new Error('fixture-provider-close'); } };
+  const result = await fixture(t, async function* () { yield { type: 'text-delta', text: '好的。' }; }, 500, { provider });
+  await assert.rejects(result.close(), error => error instanceof AggregateError);
+  await assert.rejects(result.api('/state'));
+});
 
 test('control success runs beside quick and records evidence without a deep turn', async t => {
   const writes = [], quickRequests = [];
@@ -69,6 +124,41 @@ test('control success runs beside quick and records evidence without a deep turn
   assert.equal((await result.api('/state')).queue.readyContinuations, 0);
   assert.equal((await result.api('/continue', { requestId: 'direct-control' })).handledBy, 'simple-control');
   assert.equal(result.turns.length, 0);
+});
+
+test('a pending first-use device preflight never holds the quick response path', async t => {
+  let ready = false, release;
+  const gate = new Promise(resolve => { release = resolve; });
+  let writes = 0, quickCalls = 0;
+  const provider = {
+    resolve: () => ({ homeSuffix: '3625', resourceId: 'fixture-lamp', properties: ['power'],
+      preparationRequired: !ready, approved: ready, unique: ready }),
+    async prepare() { await gate; ready = true; },
+    async write() { writes++; },
+    async readFresh(_intent, context) { return { resourceId: 'fixture-lamp', fresh: true,
+      queryId: context.queryId, properties: { power: false } }; },
+  };
+  t.after(() => release());
+  try {
+    const result = await fixture(t, async function* () { quickCalls++; yield { type: 'text-delta', text: '好的，我来处理。' }; },
+      500, { provider, blockMax: true });
+    await result.api('/prompt', { requestId: 'slow-preflight', voiceSessionId: 'fixture-voice', text: '关灯' });
+    const deadline = performance.now() + 700;
+    let state;
+    do {
+      state = await result.api('/state');
+      assert.ok(performance.now() < deadline);
+      await delay(5);
+    } while (quickCalls < 2 || state.queue.quickRunning || state.queue.quickPending);
+    assert.equal(state.controls[0].status, 'queued');
+    assert.equal(writes, 0);
+    assert.equal((await result.api('/continue', { requestId: 'slow-preflight' })).handledBy, 'simple-control');
+    release();
+    while ((await result.api('/state')).controls[0].status !== 'verified') {
+      assert.ok(performance.now() < deadline); await delay(5);
+    }
+    assert.equal(writes, 1); assert.equal(result.turns.length, 0);
+  } finally { release(); }
 });
 
 test('unconfirmed control enters only a report turn and never repeats the original action', async t => {

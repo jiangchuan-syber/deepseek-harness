@@ -78,9 +78,16 @@ export class MiioLampProvider {
     return this.starting;
   }
   resolve(intent) {
-    if (intent.target !== 'lamp' || intent.property !== 'power') return null;
+    if (intent.target !== 'lamp' || intent.property !== 'power') return { unsupported: true };
+    const executable = this.config.enabled === true && this.mode === 'execute' && this.config.allowWrite === true;
     return { approved: this.mode === 'execute' && this.config.allowWrite === true && this.freshRead,
-      unique: !!this.ready, homeSuffix: '3625', resourceId: this.ready?.resourceId, properties: ['power'] };
+      unique: !!this.ready, homeSuffix: '3625',
+      resourceId: this.ready?.resourceId ?? 'miio-lamp-' + this.config.expectedLampHash,
+      preparationRequired: executable && !this.freshRead, properties: ['power'] };
+  }
+  async prepare(intent, context) {
+    if (this.freshRead && this.ready) return;
+    await this.readFresh(intent, { ...context, queryId: randomUUID() });
   }
   onMessage(value, child) {
     const job = this.active;
