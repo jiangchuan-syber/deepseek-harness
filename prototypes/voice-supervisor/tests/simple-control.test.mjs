@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseSimpleControl, SimpleControlLane } from '../simple-control.mjs';
 
-function fixture(overrides = {}, recovered = []) {
+function fixture(overrides = {}, recovered = [], capacity = 30) {
   let clock = 0;
   const facts = structuredClone(recovered), writes = [], reads = [], properties = new Map();
   const provider = {
@@ -18,10 +18,104 @@ function fixture(overrides = {}, recovered = []) {
       queryId: context.queryId, properties: properties.get(context.resourceId) }; },
     ...overrides,
   };
-  const lane = new SimpleControlLane({ provider, budgetMs: 1000, capacity: 30, now: () => clock,
+  const lane = new SimpleControlLane({ provider, budgetMs: 1000, capacity, now: () => clock,
     store: { load: () => facts, append: fact => facts.push(structuredClone(fact)) } });
   return { lane, provider, facts, writes, reads, properties, advance: ms => { clock += ms; } };
 }
+
+test('sequential completion exceeds admission capacity without deleting old dedup facts', async () => {
+  const f = fixture({}, [], 2);
+  for (let i = 0; i < 40; i++) {
+    f.lane.offer({ requestId: 'sequential-' + i, voiceSessionId: 'voice-' + i, text: '开灯' });
+    assert.equal((await f.lane.settled('sequential-' + i)).status, 'verified');
+    assert.equal(f.lane.stats().activeAdmissions, 0);
+    assert.ok(f.lane.state().length <= 2);
+  }
+  const original = f.lane.get('sequential-0');
+  assert.equal(f.lane.stats().retainedCommands, 40); // History is retained, not claimed memory-bounded.
+  f.lane.offer({ requestId: 'sequential-0', text: '开灯' });
+  assert.deepEqual(f.lane.get('sequential-0'), original);
+  assert.equal(f.writes.length, 40); assert.equal(f.lane.stats().activeAdmissions, 0);
+  const restarted = fixture({}, f.facts, 2);
+  assert.equal(restarted.lane.get('sequential-0').goalVersion, original.goalVersion);
+  restarted.lane.offer({ requestId: 'sequential-0', text: '开灯' });
+  assert.equal(restarted.writes.length, 0);
+});
+
+test('active budget covers queued work and releases only when its actual promise settles', async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const f = fixture({ async write(intent, context) {
+    if (context.commandId === 'active') await gate;
+    f.properties.set(context.resourceId, { power: intent.value });
+  } }, [], 2);
+  try {
+    f.lane.offer({ requestId: 'active', text: '开灯' }); await nextTick();
+    f.lane.offer({ requestId: 'queued', text: '关灯' });
+    assert.equal(f.lane.stats().activeAdmissions, 2);
+    assert.throws(() => f.lane.offer({ requestId: 'overflow', text: '开风扇' }), /active-admission budget full/);
+    f.lane.cancel('queued');
+    assert.equal(f.lane.get('queued').status, 'cancelled');
+    assert.equal(f.lane.stats().activeAdmissions, 2);
+    release(); await f.lane.settled('queued');
+    assert.equal(f.lane.stats().activeAdmissions, 0);
+    assert.equal(f.lane.get('overflow'), undefined);
+  } finally { release(); await f.lane.close(); }
+});
+
+test('preparing and failed provider work count against one budget and always release it', async () => {
+  let ready = false, release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const f = fixture({
+    resolve: () => ({ homeSuffix: '3625', resourceId: 'lamp', properties: ['power'],
+      preparationRequired: !ready, approved: ready, unique: ready }),
+    async prepare() { await gate; ready = true; throw new Error('fixture-preflight-error'); },
+  }, [], 1);
+  try {
+    f.lane.offer({ requestId: 'preparing', text: '开灯' }); await nextTick();
+    assert.equal(f.lane.stats().activeAdmissions, 1);
+    assert.throws(() => f.lane.offer({ requestId: 'second', text: '开灯' }), /active-admission budget full/);
+    release(); assert.equal((await f.lane.settled('preparing')).status, 'rejected');
+    assert.equal(f.lane.stats().activeAdmissions, 0); assert.equal(f.writes.length, 0);
+    f.lane.offer({ requestId: 'second', text: '开灯' });
+    assert.equal((await f.lane.settled('second')).status, 'verified');
+  } finally { release(); await f.lane.close(); }
+});
+
+test('unknown recovery uses a read admission and never repeats a write', async () => {
+  const original = fixture({ async write() { throw new Error('fixture-unknown-write'); },
+    async readFresh() { throw new Error('fixture-read-failure'); } }, [], 1);
+  original.lane.offer({ requestId: 'uncertain', text: '关灯' });
+  assert.equal((await original.lane.settled('uncertain')).status, 'unknown');
+  assert.equal(original.lane.stats().activeAdmissions, 0);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const restored = fixture({ async readFresh(_intent, context) {
+    await gate;
+    return { resourceId: context.resourceId, queryId: context.queryId, fresh: true, properties: { power: false } };
+  } }, original.facts, 1);
+  try {
+    restored.lane.offer({ requestId: 'uncertain', text: '关灯' });
+    restored.lane.offer({ requestId: 'uncertain', text: '关灯' });
+    assert.equal(restored.lane.stats().activeAdmissions, 1);
+    assert.throws(() => restored.lane.offer({ requestId: 'new-goal', text: '开灯' }), /active-admission budget full/);
+    release(); const result = await restored.lane.settled('uncertain');
+    assert.equal(result.status, 'verified'); assert.equal(result.elapsedMs, null);
+    assert.equal(restored.writes.length, 0); assert.equal(restored.lane.stats().activeAdmissions, 0);
+  } finally { release(); await restored.lane.close(); }
+});
+
+test('closing a failed active command releases its admission without pretending success', async () => {
+  const f = fixture({ write(_intent, context) {
+    return new Promise((_, reject) => context.signal.addEventListener('abort', () => reject(new Error('fixture-cancelled')), { once: true }));
+  } }, [], 1);
+  f.lane.offer({ requestId: 'close-active', text: '开灯' }); await nextTick();
+  assert.equal(f.lane.stats().activeAdmissions, 1);
+  await f.lane.close();
+  assert.equal(f.lane.stats().activeAdmissions, 0);
+  assert.notEqual(f.lane.get('close-active').status, 'verified');
+  assert.throws(() => f.lane.offer({ requestId: 'after-close', text: '开灯' }), /lane closed/);
+});
 
 test('whole-utterance grammar accepts only explicit single-target commands', () => {
   assert.deepEqual(parseSimpleControl('把台灯关掉。'), { target: 'lamp', property: 'power', value: false });

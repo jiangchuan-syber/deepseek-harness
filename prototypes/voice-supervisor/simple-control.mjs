@@ -42,7 +42,7 @@ export class SimpleControlLane {
     if (!Number.isFinite(budgetMs) || budgetMs <= 0 || !Number.isSafeInteger(capacity) || capacity < 1) throw new Error('Invalid control limits');
     this.provider = provider; this.budgetMs = budgetMs; this.capacity = capacity; this.store = store;
     this.observe = observe; this.now = now; this.clockId = randomUUID();
-    this.entries = new Map(); this.versions = new Map(); this.tails = new Map(); this.closed = false;
+    this.entries = new Map(); this.versions = new Map(); this.tails = new Map(); this.active = new Set(); this.closed = false;
     for (const fact of store.load()) {
       if (fact.kind !== 'control.snapshot') continue;
       const entry = { ...fact.value, restored: true, promise: Promise.resolve() };
@@ -50,7 +50,6 @@ export class SimpleControlLane {
       this.entries.set(entry.commandId, entry);
       this.versions.set(entry.resourceId, Math.max(this.versions.get(entry.resourceId) ?? 0, entry.goalVersion));
     }
-    if (this.entries.size > capacity) throw new Error('Recovered control ledger exceeds capacity');
   }
   snapshot(entry) {
     if (!entry) return undefined;
@@ -58,7 +57,14 @@ export class SimpleControlLane {
     return { ...value, currentGoal: (this.versions.get(entry.resourceId) ?? 0) === entry.goalVersion };
   }
   get(commandId) { return this.snapshot(this.entries.get(commandId)); }
-  state() { return [...this.entries.values()].map(entry => this.snapshot(entry)); }
+  stats() { return { activeAdmissions: this.active.size, admissionCapacity: this.capacity,
+    retainedCommands: this.entries.size, snapshotLimit: this.capacity }; }
+  state() {
+    const active = [...this.active].map(id => this.entries.get(id));
+    const recent = [...this.entries.values()].filter(entry => !this.active.has(entry.commandId));
+    const remaining = Math.max(0, this.capacity - active.length);
+    return [...(remaining ? recent.slice(-remaining) : []), ...active].map(entry => this.snapshot(entry));
+  }
   publish(entry) {
     const value = this.snapshot(entry);
     this.store.append({ kind: 'control.snapshot', value });
@@ -72,19 +78,22 @@ export class SimpleControlLane {
     const previous = this.entries.get(job.requestId);
     if (previous) {
       if (JSON.stringify(previous.intent) !== JSON.stringify(intent)) throw new Error('Control requestId collision');
-      if (previous.needsReconcile) this.schedule(previous, true);
+      if (previous.needsReconcile) {
+        if (this.active.size >= this.capacity) throw new Error('Control active-admission budget full');
+        this.schedule(previous, true);
+      }
       return { handled: true, commandId: job.requestId };
     }
     let mapping;
     try { mapping = this.provider.resolve(intent); } catch { mapping = null; }
     if (mapping?.unsupported === true) return { handled: false };
-    if (this.entries.size >= this.capacity) throw new Error('Control ledger full');
     const preparationRequired = mapping?.preparationRequired === true && typeof this.provider.prepare === 'function'
       && mapping.homeSuffix === '3625' && typeof mapping.resourceId === 'string' && mapping.resourceId.length > 0
       && Array.isArray(mapping.properties) && mapping.properties.includes(intent.property);
     const validMapping = mappingMatches(mapping, intent);
     const resourceId = validMapping || preparationRequired ? mapping.resourceId : 'unresolved:' + intent.target;
     const error = validate(intent) ?? (validMapping || preparationRequired ? null : 'unverified_device_mapping');
+    if (!error && this.active.size >= this.capacity) throw new Error('Control active-admission budget full');
     const goalVersion = (this.versions.get(resourceId) ?? 0) + (error ? 0 : 1);
     if (!error) this.versions.set(resourceId, goalVersion);
     const entry = { commandId: job.requestId, voiceSessionId: job.voiceSessionId, intent, resourceId, goalVersion,
@@ -97,8 +106,10 @@ export class SimpleControlLane {
   }
   schedule(entry, reconcileOnly) {
     entry.needsReconcile = false;
+    this.active.add(entry.commandId);
     const tail = this.tails.get(entry.resourceId) ?? Promise.resolve();
-    entry.promise = tail.catch(() => {}).then(() => this.run(entry, reconcileOnly));
+    entry.promise = tail.catch(() => {}).then(() => this.run(entry, reconcileOnly))
+      .finally(() => this.active.delete(entry.commandId));
     this.tails.set(entry.resourceId, entry.promise);
   }
   async run(entry, reconcileOnly) {
@@ -170,7 +181,8 @@ export class SimpleControlLane {
   }
   async close() {
     this.closed = true;
-    for (const entry of this.entries.values()) this.cancel(entry.commandId);
-    await Promise.allSettled([...this.entries.values()].map(entry => entry.promise));
+    const owned = [...this.active].map(id => this.entries.get(id));
+    for (const entry of owned) this.cancel(entry.commandId);
+    await Promise.allSettled(owned.map(entry => entry.promise));
   }
 }
