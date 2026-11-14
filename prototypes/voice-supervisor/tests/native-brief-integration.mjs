@@ -21,6 +21,13 @@ const report = { status: 'NOT_RUN', nativePluginReady: false, nativeCliStarted: 
     realModelSemanticQuality: 'NOT_RUN', acoustic: 'NOT_RUN', productionChanged: false } };
 const destination = process.env.VOICE_NATIVE_REPORT ?? join(root, 'report.json');
 let dispatched = false, childAnswers = 0, rewrites = 0, secretHeaderRejected = false;
+async function checkFence() {
+  let facts;
+  try { facts = JSON.parse(await readFile(join(root, 'fence.json'), 'utf8')); }
+  catch (error) { if (error.code === 'ENOENT') return; throw error; }
+  assert.equal(facts.unknownSpawn.length + facts.deniedNetwork + facts.subprocessDenied, 0,
+    'Fixture rejected an unknown call; stop this owned attempt and inspect private denial evidence');
+}
 function sse(block, stop = 'end_turn') {
   const start = { type: 'message_start', message: { id: 'fixture-' + randomUUID(), model: 'deepseek-flash',
     usage: { input_tokens: 20, output_tokens: 0 } } };
@@ -62,7 +69,7 @@ const esbuild = esRequire.resolve('@esbuild/win32-x64/esbuild.exe');
 const cliRequire = createRequire(join(repo, 'apps/cli/package.json'));
 const subprocessSource = cliRequire.resolve('@deepseek-ai/dsh-subprocess-local/src/index.ts');
 assert.equal(resolve(subprocessSource), join(repo, 'packages/subprocess/subprocess-local/src/index.ts'));
-const ready = join(root, 'ready.json'), token = randomUUID();
+const ready = join(root, 'ready.json'), token = randomUUID(), stopNonce = randomUUID();
 let overlay = (await readFile(join(here, '../overlay.yml'), 'utf8'))
   .replace('name: ./plugin.mjs', 'name: ' + JSON.stringify(resolve(here, '../plugin.mjs').replaceAll('\\', '/')))
   .replace('    reasoningEffort: high', `    reasoningEffort: high\n    baseURL: http://127.0.0.1:${port}/anthropic\n    models:\n      - id: deepseek-flash\n        contextWindow: 128000\n        maxTokens: 4096`);
@@ -74,11 +81,13 @@ Object.assign(env, { DEEPSEEK_API_KEY: key, VOICE_MODEL: 'deepseek-flash', DSH_H
   DSH_TELEMETRY_MODE: 'DISABLED', DSH_PERMISSION_MODE: 'read-only', VOICE_LAB_TOKEN: token,
   VOICE_LAB_READY_FILE: ready, VOICE_LAB_CWD: join(root, 'workspace'), VOICE_LAB_WORKSPACE_DIR: join(root, 'workspace'),
   VOICE_NATIVE_FIXTURE_ROOT: root, VOICE_NATIVE_PROVIDER_PORT: String(port), VOICE_NATIVE_ESBUILD: esbuild,
+  VOICE_NATIVE_REPO: repo,
+  VOICE_NATIVE_STOP_NONCE: stopNonce,
   TSX_TSCONFIG_PATH: join(repo, 'tsconfig.json'), VOICE_NATIVE_SUBPROCESS_MODULE: pathToFileURL(subprocessSource).href,
   VOICE_NATIVE_ESBUILD_SHA: createHash('sha256').update(await readFile(esbuild)).digest('hex') });
 const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx/esm'), '--import', pathToFileURL(join(here, 'fixtures/native-brief-guard.mjs')).href,
   join(repo, 'apps/cli/src/bin.ts'), '--profile', 'web', '--patch', patch, '--no-open', '--host', '127.0.0.1', '--port', '0'],
-{ cwd: join(root, 'workspace'), env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+{ cwd: join(root, 'workspace'), env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
 let log = '', ended = false;
 for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => { log += chunk; });
 const exit = new Promise(done => child.once('exit', (code, signal) => { ended = true; done({ code, signal }); }));
@@ -86,6 +95,7 @@ report.ownedPid = child.pid;
 try {
   const deadline = performance.now() + 60000; let config;
   while (!config) {
+    await checkFence();
     try { config = JSON.parse(await readFile(ready, 'utf8')); } catch { /* Owned startup. */ }
     assert.ok(!ended && performance.now() < deadline, 'Native startup failed; inspect retained fixture log');
     if (!config) await delay(25);
@@ -93,12 +103,14 @@ try {
   report.nativePluginReady = true;
   let launcherReady;
   while (!launcherReady) {
+    await checkFence();
     try { launcherReady = JSON.parse(await readFile(join(root, 'native-app-ready.json'), 'utf8')); } catch { /* Actual boot commit, not a timer. */ }
     assert.ok(!ended && performance.now() < deadline, 'Full profile startup failed or did not commit launcher readiness');
     if (!launcherReady) await delay(25);
   }
   assert.equal(launcherReady.launcherCommitted, true);
   const api = async (path, body) => {
+    await checkFence();
     const r = await fetch(`http://127.0.0.1:${config.port}${path}`, { method: body === undefined ? 'GET' : 'POST',
       headers: { authorization: 'Bearer ' + token }, body: body === undefined ? undefined : JSON.stringify(body) });
     assert.ok(r.ok, `${path} status${r.status}`); return r.json();
@@ -110,6 +122,7 @@ try {
   await api('/prompt', { requestId, voiceSessionId: 'public-native-voice', text: '检查公开子任务结构并汇总结果。' });
   let continued = false, events = [];
   while (performance.now() < deadline) {
+    await checkFence();
     events = (await api('/events?after=0')).events;
     if (!continued && events.some(e => e.type === 'quick.completed')) { await api('/continue', { requestId }); continued = true; }
     if (events.some(e => e.type === 'session' && e.data.event.type === 'assistant/message'
@@ -125,15 +138,23 @@ try {
   assert.equal(secretHeaderRejected, false); report.events = events; report.status = 'PASS';
 } catch (error) { report.status = 'FAIL'; report.error = { name: error.name, message: error.message }; }
 finally {
-  if (!ended) child.kill('SIGINT');
-  report.exit = await Promise.race([exit, delay(5000).then(() => ({ pending: true }))]);
+  if (!ended && child.connected) {
+    try { child.send({ type: 'voice-native-fixture-stop', nonce: stopNonce }); report.launcherExitSent = true; }
+    catch (error) { report.exitRequestErrorType = error.name; }
+  }
+  let timeout;
+  try { report.exit = await Promise.race([exit, new Promise(done => { timeout = setTimeout(() => done({ pending: true }), 12000); })]); }
+  finally { clearTimeout(timeout); }
   if (!ended) { child.kill('SIGKILL'); report.forcedStop = true; report.exit = await exit; }
   await writeFile(join(root, 'native-cli.log'), log);
   try { report.fence = JSON.parse(await readFile(join(root, 'fence.json'), 'utf8')); } catch { report.fence = null; }
   report.structuralStatus = report.status;
   report.guardStatus = report.fence && report.fence.unknownSpawn.length === 0
-    && report.fence.deniedNetwork === 0 && report.fence.subprocessDenied === 0 ? 'PASS' : 'FAIL';
-  if (report.guardStatus !== 'PASS') report.status = 'FAIL';
+    && report.fence.deniedNetwork === 0 && report.fence.subprocessDenied === 0
+    && report.fence.expectedStartupReads.every(item => item.settled
+      && (item.layer === 'node' ? item.directChildExited : item.rangeEmpty)) ? 'PASS' : 'FAIL';
+  report.lifecycleStatus = !report.forcedStop && report.exit.code === 0 && report.exit.signal === null ? 'PASS' : 'FAIL';
+  if (report.guardStatus !== 'PASS' || report.lifecycleStatus !== 'PASS') report.status = 'FAIL';
   report.fixtureDirectory = root;
   await writeFile(destination, JSON.stringify(report, null, 2) + '\n');
   await new Promise(done => provider.close(done));
