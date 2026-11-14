@@ -23,4 +23,6 @@
           maxTokens: 64
           maxChars: 30
           timeoutMs: 15000
+          cancelGraceMs: 50
+          maxOutstanding: 2
           capacity: 32

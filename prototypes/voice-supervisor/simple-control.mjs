@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 const TARGETS = new Map([['台灯', 'lamp'], ['灯', 'lamp'], ['循环扇', 'fan'], ['风扇', 'fan'],
   ['净化器', 'purifier'], ['空调', 'ac']]);
 const TERMINAL = new Set(['verified', 'rejected', 'superseded', 'cancelled']);
+const admissionFull = () => Object.assign(new Error('Control active-admission budget full'), { code: 'CONTROL_ADMISSION_FULL' });
 
 /** Recognize one complete explicit command; all other language stays with the parent. */
 export function parseSimpleControl(text) {
@@ -79,7 +80,7 @@ export class SimpleControlLane {
     if (previous) {
       if (JSON.stringify(previous.intent) !== JSON.stringify(intent)) throw new Error('Control requestId collision');
       if (previous.needsReconcile) {
-        if (this.active.size >= this.capacity) throw new Error('Control active-admission budget full');
+        if (this.active.size >= this.capacity) throw admissionFull();
         this.schedule(previous, true);
       }
       return { handled: true, commandId: job.requestId };
@@ -93,7 +94,7 @@ export class SimpleControlLane {
     const validMapping = mappingMatches(mapping, intent);
     const resourceId = validMapping || preparationRequired ? mapping.resourceId : 'unresolved:' + intent.target;
     const error = validate(intent) ?? (validMapping || preparationRequired ? null : 'unverified_device_mapping');
-    if (!error && this.active.size >= this.capacity) throw new Error('Control active-admission budget full');
+    if (!error && this.active.size >= this.capacity) throw admissionFull();
     const goalVersion = (this.versions.get(resourceId) ?? 0) + (error ? 0 : 1);
     if (!error) this.versions.set(resourceId, goalVersion);
     const entry = { commandId: job.requestId, voiceSessionId: job.voiceSessionId, intent, resourceId, goalVersion,

@@ -3,10 +3,11 @@ import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { load, Type, DEFAULT_SCHEMA } from 'js-yaml';
+import { setTimeout as delay } from 'node:timers/promises';
 
 const fixtureRoot = resolve(process.env.VOICE_OUTER_FIXTURE_ROOT ?? 'missing-fixture-root');
 const fixtureState = join(fixtureRoot, 'broker-state.json');
@@ -24,6 +25,13 @@ globalThis.fetch = (input, options) => {
   if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || Number(url.port) !== nativePort) {
     evidence.publicNetworkAttempts++; save(); throw new Error('Fixture denied non-owned fetch');
   }
+  if (url.pathname === '/events' && existsSync(join(fixtureRoot, 'hold-events'))) return (async () => {
+    writeFileSync(join(fixtureRoot, 'events-held'), 'fixture-only');
+    while (existsSync(join(fixtureRoot, 'hold-events'))) {
+      options?.signal?.throwIfAborted(); await delay(10);
+    }
+    return originalFetch(input, options);
+  })();
   return originalFetch(input, options);
 };
 childProcess.spawn = function(command, args, options = {}) {
@@ -89,6 +97,8 @@ childProcess.spawn = function(command, args, options = {}) {
       const { apply } = await import(pathToFileURL(plugin.name).href);
       await apply(ctx, plugin.config);
       nativePort = JSON.parse(readFileSync(plugin.config.readyFile, 'utf8')).port;
+      writeFileSync(join(fixtureRoot, 'native-client.private.json'), JSON.stringify({
+        url: 'http://127.0.0.1:' + nativePort, token: plugin.config.token }));
       save();
     } catch (error) {
       evidence.errorType = error.name; evidence.error = error.message; save();

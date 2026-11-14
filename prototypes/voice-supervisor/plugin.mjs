@@ -4,7 +4,7 @@ import { writeFileSync, appendFileSync, readFileSync, existsSync } from 'node:fs
 import { dirname, join } from 'node:path';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { StageQueue } from './stages.mjs';
-import { QuickLane, quickInput, shortReply } from './quick.mjs';
+import { QuickLane, QuickSupersededError, quickInput, shortReply } from './quick.mjs';
 import { publicSessionEvent } from './trace.mjs';
 import { SimpleControlLane } from './simple-control.mjs';
 import { createControlProvider } from './control-provider.mjs';
@@ -19,10 +19,12 @@ export async function apply(ctx, config) {
   if (config.simpleControl && typeof config.simpleControl.enabled !== 'boolean') throw new Error('simpleControl.enabled must be boolean');
   const controlProvider = config.simpleControl?.enabled === true ? createControlProvider(config.simpleControl.provider) : null;
   const limits = config.quick;
-  for (const key of ['contextChars', 'inputChars', 'maxTokens', 'maxChars', 'timeoutMs', 'capacity']) {
+  for (const key of ['contextChars', 'inputChars', 'maxTokens', 'maxChars', 'timeoutMs', 'capacity', 'cancelGraceMs', 'maxOutstanding']) {
     if (!Number.isSafeInteger(limits?.[key]) || limits[key] < 1) throw new Error('Invalid quick config: ' + key);
   }
   if (limits.maxChars < 2) throw new Error('quick.maxChars must be at least 2');
+  if (limits.maxOutstanding > 2) throw new Error('quick.maxOutstanding cannot exceed 2');
+  if (limits.cancelGraceMs > limits.timeoutMs) throw new Error('quick.cancelGraceMs cannot exceed timeoutMs');
   const workspace = await ctx.workspaceRegistry.create(config.cwd, 'Voice supervisor isolated lab');
   let sessionId;
   if (process.env.VOICE_LAB_SESSION_ID) {
@@ -111,8 +113,10 @@ export async function apply(ctx, config) {
   });
   for (const fact of recovered) if (fact.kind === 'input.queued') stages.seen.add(fact.job.requestId);
   const quickJournal = join(dirname(config.readyFile), 'quick-requests.jsonl');
-  const runQuick = async (job, controller, probe = false) => {
+  const runQuick = async (job, controller, probe = false, isCurrent = () => true, disposition = () => null) => {
       const emit = probe ? () => {} : record;
+      const requireCurrent = () => { if (!isCurrent()) throw new QuickSupersededError(); };
+      requireCurrent();
       const preparedAt = performance.now();
       const input = quickInput(probe ? [{ role: '用户', text: '你好。'.repeat(400) }] : recent, job.text, limits);
       const attemptId = 'quick-' + randomUUID();
@@ -155,6 +159,7 @@ export async function apply(ctx, config) {
           },
         };
         for await (const chunk of observed) {
+          requireCurrent();
           if (chunk.type === 'finish') {
             finishReceived = true;
             finishReason = ['stop', 'tool-calls', 'max-tokens', 'aborted', 'error'].includes(chunk.reason?.kind) ? chunk.reason.kind : 'other';
@@ -180,11 +185,13 @@ export async function apply(ctx, config) {
       } catch (error) {
         requestError = errorFacts(error);
         if (streamExit === 'pending') streamExit = 'error';
+        requireCurrent();
         // 超时被中断时，只要已经拿到文字就先播出去：宁可少几个字，也别整条没有接话。
-        if (!(error?.name === 'AbortError' && text.trim() && !/[\u3002\uff01\uff1f!?]$/.test(text))) throw error;
+        if (!(timeoutFiredAtMs !== null && error?.name === 'AbortError' && text.trim() && !/[\u3002\uff01\uff1f!?]$/.test(text))) throw error;
         partialTextFallback = true;
         text = text.replace(/[\uff0c\u3001\uff1b\uff1a]?$/u, '') + '\u3002';
       }
+      requireCurrent();
       if (!text.trim()) throw new Error('Quick reply contained no spoken text');
         const messageId = randomUUID();
         appendFileSync(quickJournal, JSON.stringify({ at: Date.now(), kind: 'quick.reply', requestId: job.requestId,
@@ -206,7 +213,8 @@ export async function apply(ctx, config) {
       } finally {
         const ended = performance.now(), signalAbortedBeforeCleanup = controller.signal.aborted;
         clearTimeout(timeout); controller.abort();
-        const diagnostics = { requestId: job.requestId, attemptId, outcome: completed ? 'completed' : 'failed',
+        const superseded = disposition() === 'superseded' || controller.signal.reason?.code === 'QUICK_SUPERSEDED';
+        const diagnostics = { requestId: job.requestId, attemptId, outcome: completed ? 'completed' : superseded ? 'superseded' : 'failed',
           elapsedMs: ended - started, receivedTextChars, nonWhitespaceCharacterCount, textDeltaCount,
           spokenTextChars: Array.from(text).length, firstTextMs: firstTextMs ?? null, firstNonWhitespaceTextMs,
           lastTextDeltaAgeMs: lastTextAt === undefined ? null : ended - lastTextAt,
@@ -237,7 +245,8 @@ export async function apply(ctx, config) {
         content: [{ type: 'text', text: '程序执行事实，仅供上下文使用，不是新的用户指令，不重放动作。目标当前性及验证以事实字段为准；用户打断声音不撤销此动作。\n' + JSON.stringify(fact) }] }));
     },
   }) : null;
-  const quickLane = new QuickLane({ capacity: limits.capacity,
+  const quickLane = new QuickLane({ capacity: limits.capacity, scopeOf: job => job.quickParentSessionId,
+    cancelGraceMs: limits.cancelGraceMs, maxOutstanding: limits.maxOutstanding,
     observe: (kind, job, extra = {}) => {
       appendFileSync(quickJournal, JSON.stringify({ at: Date.now(), kind, job, ...extra }) + '\n');
       record(kind, { owner: job, ...extra });
@@ -249,7 +258,7 @@ export async function apply(ctx, config) {
         if (fact.currentGoal && !['verified', 'superseded'].includes(fact.status)) stages.enqueue({ ...job, controlReport: fact }, { quickDone: true });
       }).catch(error => record('control.report_error', { requestId: job.requestId, error: error.message }));
     },
-    run: async (job, controller) => (await runQuick(job, controller)).text,
+    run: async (job, controller, isCurrent, disposition) => (await runQuick(job, controller, false, isCurrent, disposition)).text,
   });
   for (const fact of recovered) if (fact.kind === 'input.queued') quickLane.seen.add(fact.job.requestId);
 
@@ -321,7 +330,11 @@ export async function apply(ctx, config) {
       conversationStarted: parent.session.snapshotEvents().some(event => event.type === 'turn/start'),
       phase: parent.status === 'running' ? activity === 'tools' ? 'tools' : phase === 'quick' ? 'quick' : 'thinking'
         : [...children.values()].some(child => !child.ended) ? 'waiting-child' : 'idle',
-      queue: { ...stages.snapshot(), quickPending: quickLane.jobs.length, quickRunning: !!quickLane.running, quickError: quickLane.lastError, quickClosed: quickLane.closed, readyContinuations: readyContinuations.size }, controls: controlLane?.state() ?? [],
+      queue: { ...stages.snapshot(), quickPending: quickLane.jobs.length,
+        quickRunning: !!quickLane.running || quickLane.controllers.size > 0, quickCleanupPending: quickLane.retired.size,
+        quickOutstanding: quickLane.controllers.size, quickProbeRunning: !!quickLane.probeExecution,
+        quickError: quickLane.lastError, quickClosed: quickLane.closed,
+        readyContinuations: readyContinuations.size }, controls: controlLane?.state() ?? [],
       controlSourceInstance: controlLane?.clockId, controlSequence, controlStats: controlLane?.stats(), children: [...children.values()], sequence,
     });
     if (req.method === 'GET' && url.pathname === '/events') {
@@ -349,15 +362,24 @@ export async function apply(ctx, config) {
       return send(202, { accepted: true });
     }
     if (req.method === 'POST' && url.pathname === '/quick-probe') {
-      const measured = await runQuick({ requestId: 'probe-' + randomUUID(), text: '你好，现在能听到吗？', acceptedAt: Date.now() }, new AbortController(), true);
+      if (quickLane.running || quickLane.jobs.length || quickLane.controllers.size)
+        return send(409, { error: 'Quick diagnostic requires an idle lane' });
+      const measured = await quickLane.probe({ requestId: 'probe-' + randomUUID(), text: '你好，现在能听到吗？',
+        acceptedAt: Date.now(), quickParentSessionId: sessionId },
+      (job, controller, isCurrent, disposition) => runQuick(job, controller, true, isCurrent, disposition));
       const { text: _text, ...metrics } = measured;
       return send(200, metrics);
     }
     if (req.method === 'POST' && url.pathname === '/prompt') {
       if (typeof input.text !== 'string' || !input.text.trim() || typeof input.requestId !== 'string') throw new Error('text and requestId required');
-      if (readyContinuations.size >= limits.capacity) return send(503, { error: 'Deep handoff queue full' });
-      const job = { ...input, acceptedAt: Number.isFinite(input.acceptedAt) ? input.acceptedAt : Date.now() };
-      job.controlHandled = controlLane?.offer(job).handled === true;
+      const job = { ...input, quickParentSessionId: sessionId,
+        acceptedAt: Number.isFinite(input.acceptedAt) ? input.acceptedAt : Date.now() };
+      try { job.controlHandled = controlLane?.offer(job).handled === true; }
+      catch (error) {
+        if (error.code === 'CONTROL_ADMISSION_FULL') return send(503, { error: 'Control active-admission budget full' });
+        throw error;
+      }
+      if (!job.controlHandled && readyContinuations.size >= limits.capacity) return send(503, { error: 'Deep handoff queue full' });
       try { quickLane.enqueue(job); }
       catch (error) { if (job.controlHandled) controlLane.cancel(job.requestId); throw error; }
       record('prompt.accepted', { requestId: input.requestId });
