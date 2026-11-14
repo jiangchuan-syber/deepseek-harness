@@ -43,6 +43,51 @@ test('write acknowledgement needs a separate matching fresh read', async () => {
   assert.ok(result.readIssuedAt >= result.acceptedAt);
 });
 
+test('first-use async preflight verifies mapping before any write within the same budget', async () => {
+  let prepared = false;
+  const order = [];
+  const f = fixture({
+    resolve: () => ({ homeSuffix: '3625', resourceId: 'lamp', properties: ['power'],
+      preparationRequired: !prepared, approved: prepared, unique: prepared }),
+    async prepare() { order.push('preflight'); await nextTick(); prepared = true; },
+    async write(intent) { order.push('write'); f.properties.set('lamp', { power: intent.value }); },
+  });
+  f.lane.offer({ requestId: 'first-use', text: '关灯' });
+  assert.equal(f.lane.get('first-use').status, 'queued');
+  const result = await f.lane.settled('first-use');
+  assert.deepEqual(order, ['preflight', 'write']);
+  assert.equal(result.status, 'verified'); assert.equal(result.preparationRequired, false);
+});
+
+test('failed, expired or superseded preflight never writes', async () => {
+  for (const outcome of ['bad-mapping', 'expired', 'superseded']) {
+    let prepared = false;
+    const f = fixture({
+      resolve: () => ({ homeSuffix: '3625', resourceId: 'lamp', properties: ['power'],
+        preparationRequired: !prepared, approved: prepared && outcome !== 'bad-mapping', unique: prepared }),
+      async prepare() {
+        prepared = true;
+        if (outcome === 'expired') f.advance(1001);
+        if (outcome === 'superseded') f.lane.versions.set('lamp', 2);
+      },
+    });
+    f.lane.offer({ requestId: outcome, text: '关灯' });
+    const result = await f.lane.settled(outcome);
+    assert.notEqual(result.status, 'verified'); assert.equal(result.writeAttempted, false);
+    assert.equal(f.writes.length, 0);
+  }
+});
+
+test('explicitly unsupported provider commands stay with the normal supervisor even at ledger capacity', async () => {
+  const f = fixture();
+  f.lane.capacity = 1;
+  f.lane.offer({ requestId: 'supported', text: '开灯' });
+  await f.lane.settled('supported');
+  f.provider.resolve = () => ({ unsupported: true });
+  assert.equal(f.lane.offer({ requestId: 'unsupported', text: '开风扇' }).handled, false);
+  assert.equal(f.lane.state().length, 1);
+});
+
 test('invalid ranges reject without clamping and unverified identity fails closed', async () => {
   for (const text of ['台灯亮度调到0', '台灯亮度调到101', '空调温度调到15', '空调温度调到31']) {
     const f = fixture(); f.lane.offer({ requestId: 'invalid', text });

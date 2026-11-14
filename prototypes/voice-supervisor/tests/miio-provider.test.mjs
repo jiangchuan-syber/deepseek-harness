@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { MiioLampProvider } from '../miio-provider.mjs';
 import { SimpleControlLane } from '../simple-control.mjs';
+import { createControlProvider } from '../control-provider.mjs';
 
 const python = process.env.VOICE_CONTROL_TEST_PYTHON ?? 'python';
 const intent = { target: 'lamp', property: 'power', value: false };
@@ -43,6 +44,24 @@ test('provider is disabled by default and cannot launch or send an actuator requ
   await assert.rejects(p.start(), /provider_disabled/);
   await assert.rejects(p.write(intent, context()), /actuation_disabled/);
   assert.equal(p.child, null); await p.close();
+});
+
+test('configured factory is lazy and first control command performs a real fixture preflight', async t => {
+  const f = await fixture(t, { mode: 'execute', allowWrite: true, cooperativeControlReady: true });
+  const provider = createControlProvider({ ...f.config, kind: 'miio-lamp' });
+  try {
+    assert.equal(provider.child, null); assert.equal(provider.ready, null);
+    const facts = [];
+    const lane = new SimpleControlLane({ provider, budgetMs: 2500, capacity: 4,
+      store: { load: () => [], append: value => facts.push(value) } });
+    lane.offer({ requestId: 'factory-first-use', voiceSessionId: 'public-fixture-voice', text: '关灯' });
+    const result = await lane.settled('factory-first-use');
+    assert.equal(result.status, 'verified'); assert.equal(result.preparationRequired, false);
+    assert.equal((await f.state()).writes, 1);
+    assert.equal(facts[0].value.writeAttempted, false);
+    assert.equal(result.readback.resourceId, provider.ready.resourceId);
+    await lane.close();
+  } finally { await provider.close(); }
 });
 
 test('read-only provider pins private inventory and echoes only a fresh query identity', async t => {

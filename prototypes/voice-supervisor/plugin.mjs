@@ -7,6 +7,7 @@ import { StageQueue } from './stages.mjs';
 import { QuickLane, quickInput, shortReply } from './quick.mjs';
 import { publicSessionEvent } from './trace.mjs';
 import { SimpleControlLane } from './simple-control.mjs';
+import { createControlProvider } from './control-provider.mjs';
 
 /** Opt-in local experiment. Mount through a dsh profile; no installed source is modified. */
 export const name = 'voice-supervisor-lab';
@@ -15,6 +16,7 @@ export async function apply(ctx, config) {
   if (!config.token || !config.readyFile || !config.cwd) throw new Error('token, readyFile, cwd required');
   if (!['low', 'high', 'max'].includes(config.supervisorReasoningEffort)) throw new Error('Invalid supervisorReasoningEffort');
   if (config.simpleControl && typeof config.simpleControl.enabled !== 'boolean') throw new Error('simpleControl.enabled must be boolean');
+  const controlProvider = config.simpleControl?.enabled === true ? createControlProvider(config.simpleControl.provider) : null;
   const limits = config.quick;
   for (const key of ['contextChars', 'inputChars', 'maxTokens', 'maxChars', 'timeoutMs', 'capacity']) {
     if (!Number.isSafeInteger(limits?.[key]) || limits[key] < 1) throw new Error('Invalid quick config: ' + key);
@@ -221,10 +223,12 @@ export async function apply(ctx, config) {
   };
   const readyContinuations = new Map();
   const handledControls = new Set();
+  let controlSequence = 0;
   const controlLane = config.simpleControl?.enabled === true ? new SimpleControlLane({
-    provider: ctx.voiceDeviceControl, budgetMs: config.simpleControl.budgetMs, capacity: config.simpleControl.capacity,
+    provider: controlProvider, budgetMs: config.simpleControl.budgetMs, capacity: config.simpleControl.capacity,
     store: { load: () => recovered, append: fact => appendFileSync(journal, JSON.stringify({ at: Date.now(), ...fact }) + '\n', { flush: true }) },
     observe: fact => {
+      controlSequence++;
       record('control.state', fact);
       if (!['verified', 'unknown', 'rejected', 'cancelled', 'superseded'].includes(fact.status)) return;
       parent.inject(createUserMessage({ source: { kind: 'voice-continuation', form: 'notice',
@@ -313,7 +317,8 @@ export async function apply(ctx, config) {
       conversationStarted: parent.session.snapshotEvents().some(event => event.type === 'turn/start'),
       phase: parent.status === 'running' ? activity === 'tools' ? 'tools' : phase === 'quick' ? 'quick' : 'thinking'
         : [...children.values()].some(child => !child.ended) ? 'waiting-child' : 'idle',
-      queue: { ...stages.snapshot(), quickPending: quickLane.jobs.length, quickRunning: !!quickLane.running, quickError: quickLane.lastError, quickClosed: quickLane.closed, readyContinuations: readyContinuations.size }, controls: controlLane?.state() ?? [], children: [...children.values()], sequence,
+      queue: { ...stages.snapshot(), quickPending: quickLane.jobs.length, quickRunning: !!quickLane.running, quickError: quickLane.lastError, quickClosed: quickLane.closed, readyContinuations: readyContinuations.size }, controls: controlLane?.state() ?? [],
+      controlSourceInstance: controlLane?.clockId, controlSequence, children: [...children.values()], sequence,
     });
     if (req.method === 'GET' && url.pathname === '/events') {
       const after = Number(url.searchParams.get('after') ?? '0');
@@ -373,11 +378,16 @@ export async function apply(ctx, config) {
   ctx.on('dispose', async () => {
     closing = true;
     await quickLane.close();
-    await controlLane?.close();
+    const controlCleanup = await Promise.allSettled([
+      Promise.resolve().then(() => controlLane?.close()),
+      Promise.resolve().then(() => controlProvider?.close?.()),
+    ]);
     parent.cancel({ kind: 'user' });
     await stages.close();
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
     await Promise.allSettled([...pending]);
+    const controlErrors = controlCleanup.filter(result => result.status === 'rejected').map(result => result.reason);
+    if (controlErrors.length) throw new AggregateError(controlErrors, 'Control resource cleanup failed');
   });
 }

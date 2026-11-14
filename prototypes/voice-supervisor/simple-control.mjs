@@ -29,6 +29,12 @@ function validate(intent) {
   return null;
 }
 
+function mappingMatches(mapping, intent, resourceId = mapping?.resourceId) {
+  return mapping?.approved === true && mapping?.unique === true && mapping?.homeSuffix === '3625'
+    && typeof resourceId === 'string' && resourceId.length > 0 && mapping.resourceId === resourceId
+    && Array.isArray(mapping.properties) && mapping.properties.includes(intent.property);
+}
+
 /** Fixture-first control scheduling. A provider must own authorization, identity and fresh device reads. */
 export class SimpleControlLane {
   constructor({ provider, budgetMs, capacity, store, observe = () => {}, now = () => performance.now() }) {
@@ -69,18 +75,21 @@ export class SimpleControlLane {
       if (previous.needsReconcile) this.schedule(previous, true);
       return { handled: true, commandId: job.requestId };
     }
-    if (this.entries.size >= this.capacity) throw new Error('Control ledger full');
     let mapping;
     try { mapping = this.provider.resolve(intent); } catch { mapping = null; }
-    const validMapping = mapping?.approved === true && mapping?.unique === true && mapping?.homeSuffix === '3625'
-      && typeof mapping.resourceId === 'string' && mapping.resourceId.length > 0
+    if (mapping?.unsupported === true) return { handled: false };
+    if (this.entries.size >= this.capacity) throw new Error('Control ledger full');
+    const preparationRequired = mapping?.preparationRequired === true && typeof this.provider.prepare === 'function'
+      && mapping.homeSuffix === '3625' && typeof mapping.resourceId === 'string' && mapping.resourceId.length > 0
       && Array.isArray(mapping.properties) && mapping.properties.includes(intent.property);
-    const resourceId = validMapping ? mapping.resourceId : 'unresolved:' + intent.target;
-    const error = validate(intent) ?? (validMapping ? null : 'unverified_device_mapping');
+    const validMapping = mappingMatches(mapping, intent);
+    const resourceId = validMapping || preparationRequired ? mapping.resourceId : 'unresolved:' + intent.target;
+    const error = validate(intent) ?? (validMapping || preparationRequired ? null : 'unverified_device_mapping');
     const goalVersion = (this.versions.get(resourceId) ?? 0) + (error ? 0 : 1);
     if (!error) this.versions.set(resourceId, goalVersion);
     const entry = { commandId: job.requestId, voiceSessionId: job.voiceSessionId, intent, resourceId, goalVersion,
-      clockId: this.clockId, acceptedAt: this.now(), status: 'queued', writeAttempted: false, writeAcknowledged: false };
+      clockId: this.clockId, acceptedAt: this.now(), status: 'queued', preparationRequired,
+      writeAttempted: false, writeAcknowledged: false };
     this.entries.set(job.requestId, entry);
     if (error) { entry.status = 'rejected'; entry.error = error; this.publish(entry); entry.promise = Promise.resolve(); }
     else { this.publish(entry); this.schedule(entry, false); }
@@ -111,6 +120,15 @@ export class SimpleControlLane {
     try {
       if (expired()) { entry.status = 'cancelled'; entry.error = 'expired_before_write'; return; }
       if (!reconcileOnly) {
+        if (entry.preparationRequired) {
+          await this.provider.prepare(entry.intent, context);
+          if (expired()) { entry.status = 'cancelled'; entry.error = 'expired_during_preflight'; return; }
+          if (!context.isCurrent()) { entry.status = 'superseded'; return; }
+          if (!mappingMatches(this.provider.resolve(entry.intent), entry.intent, entry.resourceId)) {
+            entry.status = 'rejected'; entry.error = 'unverified_device_mapping'; return;
+          }
+          entry.preparationRequired = false;
+        }
         entry.status = 'writing'; entry.writeAttempted = true; this.publish(entry);
         try { await this.provider.write(entry.intent, context); entry.writeAcknowledged = true; }
         catch (error) {
