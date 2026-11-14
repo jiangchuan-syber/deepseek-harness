@@ -25,12 +25,14 @@ export function apply(ctx) {
   const off = ready.onReady(() => writeFileSync(join(process.env.VOICE_NATIVE_FIXTURE_ROOT,
     'native-app-ready.json'), JSON.stringify({ launcherCommitted: true })));
   ctx.effect(() => off);
-  const exit = ctx.get('appExit');
-  if (typeof exit !== 'function') throw new Error('Actual launcher appExit service is required');
+  if (process.listenerCount('SIGTERM') < 1) throw new Error('Actual launcher SIGTERM handler is required');
   const stop = () => {
     writeFileSync(join(process.env.VOICE_NATIVE_FIXTURE_ROOT, 'native-app-exit-request.json'),
-      JSON.stringify({ actualLauncherExitRequested: true }));
-    exit(0);
+      JSON.stringify({ actualLauncherExitRequested: true, standardSigtermEmitted: true,
+        standardSignalHandlerPresent: process.listenerCount('SIGTERM') > 0 }));
+    // Same in-process signal entry used by the repository's real Web CLI IPC
+    // fixture; Windows child.kill(SIGTERM) would terminate instead of emitting it.
+    process.emit('SIGTERM');
   };
   bindOwnedStop(ctx, process.env.VOICE_NATIVE_STOP_NONCE, stop, () => {
     writeFileSync(join(process.env.VOICE_NATIVE_FIXTURE_ROOT, 'native-ipc-disposed.json'),

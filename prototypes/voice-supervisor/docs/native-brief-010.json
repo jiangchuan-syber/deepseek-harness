@@ -1,0 +1,104 @@
+{
+  "formatVersion": 1,
+  "caseId": "native-brief-010",
+  "kind": "synthetic-provider-real-native-structure",
+  "scope": "one actual CLI/Cordis parent-child-inbox-parent generation case with standard idle shutdown",
+  "sourcePr": 9,
+  "basePr": 8,
+  "sourceSha256": {
+    "tests/native-brief-integration.mjs": "56457bc4fe7de5a54c4e7268ba26e3f235592a5b7c87fd4e7f21b0567c4ca037",
+    "tests/fixtures/native-brief-policy.mjs": "9dfbeafd262e8c1f67e22b84fb141d7a4b4e8b7fd62c3a2a7395f703fd08fdfd",
+    "tests/fixtures/native-brief-guard.mjs": "77acb0fbd33c4873fee508bb3316a0a7bb38de6229f2af14546ffdf7b5eb789b",
+    "tests/fixtures/native-brief-git-rule.mjs": "c6192614caf4bbff1f927e67d408dfa6ec74ce2f53608d8de7490d303e163710",
+    "tests/fixtures/native-brief-runner-rule.mjs": "829385ec1666f1bbf4ef0ff51888b422ec6f2000c350738912bc55984c925088",
+    "tests/fixtures/native-brief-owned-read.mjs": "31e90ac6a961822ab7a79303c477063ff846ed5c696f40f894063b969bb6b7fd"
+  },
+  "rawReportSha256": "56f6887d133baa3c37b88865cc2d49fb705b3a10a8ca4dfc65f1871c1ab7193b",
+  "nativeEventsSha256": "73b632a91bb9b2abb80b2783bd049d9283d644a5d370bdba2e18dfb99e3f9c65",
+  "actual": {
+    "status": "PASS",
+    "structuralStatus": "PASS",
+    "guardStatus": "PASS",
+    "lifecycleStatus": "PASS",
+    "launcherReady": true,
+    "pluginReady": true,
+    "modelHttpRequests": 5,
+    "quickTools": 0,
+    "nativeToolDispatch": true,
+    "actualInProcessChild": true,
+    "parentInboxNotice": true,
+    "separateParentModelRequestWithBrief": true,
+    "newParentAssistantMessage": true,
+    "unknownSpawnCount": 0,
+    "deniedNetworkCount": 0,
+    "deniedSubprocessCount": 0,
+    "preStopTurnEnded": true,
+    "preStopNativeIdle": true,
+    "expectedStartupReads": [
+      {
+        "layer": "runtime",
+        "command": "reviewed-git-workspace-location",
+        "settled": true,
+        "rangeEmpty": true,
+        "exitCode": 128
+      },
+      {
+        "layer": "node",
+        "command": "reviewed-windows-job-git-bootstrap",
+        "settled": true,
+        "directChildExited": true,
+        "exitCode": 0
+      },
+      {
+        "layer": "runtime",
+        "command": "reviewed-git-workspace-location",
+        "settled": true,
+        "rangeEmpty": true,
+        "exitCode": 128
+      },
+      {
+        "layer": "node",
+        "command": "reviewed-windows-job-git-bootstrap",
+        "settled": true,
+        "directChildExited": true,
+        "exitCode": 0
+      }
+    ],
+    "exit": {
+      "code": 0,
+      "signal": null
+    },
+    "forcedTermination": false,
+    "ownedProcessAbsenceIndependentlyVerified": true
+  },
+  "priorChecks": {
+    "officialArtifactBuild": {
+      "gatesPassed": 8,
+      "gatesFailed": 0,
+      "seconds": 95.52,
+      "clientArtifacts": 362,
+      "logSha256": "f2b06dd55c6ac0f09138d316d94bde95946c1dfea7be40a0cd59091086f75c9f"
+    },
+    "focusedSourceNegativeControls": 6,
+    "normalPrepushTypecheck": "5/5 before the standard shutdown change",
+    "docSync": {
+      "passed": 41,
+      "failed": 2,
+      "seconds": 617.13,
+      "unresolved": [
+        "repository references: unchanged uv.lock plus untracked scratch logs",
+        "Windows site symlink EPERM:165/166 site tests passed"
+      ]
+    }
+  },
+  "limits": {
+    "realModelSemanticQuality": "NOT_RUN",
+    "busyNativeParentScopeCases": "NOT_RUN",
+    "audio": "NOT_RUN",
+    "browserVisuals": "NOT_RUN",
+    "physicalOneSecond": "NOT_RUN",
+    "physicalThreeSeconds": "NOT_RUN",
+    "osChildAgentIsolation": "NOT_RUN"
+  },
+  "preservedRisk": "native-brief-009: write EPIPE during Git cancellation in WindowsJobOwner.signal; rangeEmpty false and forced SIGKILL. Standard idle shutdown PASS does not establish arbitrary cancellation fixed."
+}

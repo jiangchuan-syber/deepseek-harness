@@ -61,7 +61,7 @@ overlay 读取 `VOICE_SIMPLE_CONTROL_CONFIG` JSON，缺省为 `{ "enabled": fals
 
 `node prototypes/voice-supervisor/tests/native-brief-integration.mjs` 是独立的无密钥原生结构诊断。先在依赖和输出目录均独占的隔离checkout运行官方 `pnpm run build:artifacts --serial`。它以私有 `DSH_HOME` 和工作区启动真实CLI Web profile、Cordis、工具与子Agent，只连接一个合成本机Messages提供方。启动以launcher的 `appReady` 和鉴权状态接口为证，较早的语音插件ready文件不算。该case检查子任务派发、收件箱回传和主会话另一次生成的新汇总。合成回复只证明通信结构，不证明模型判断；子Agent在同一进程内，不证明OS进程隔离或强制终止任务。
 
-原生诊断允许固定校验的转译器、已核安装Git在独占目录执行的唯一精确工作区定位读取及其已哈希Windows Job启动器，以及独占provider端口。规则核realpath、二进制SHA和每个参数；Windows按不区分大小写比较规范路径。它拒绝其他子进程和网络请求，私有保存有界拒绝详情，并分别报告结构、guard与生命周期结果；即使可选插件吞掉异常，被拦调用仍让整个case失败。私有IPC请求真实launcher的 `appExit`，强制终止或预期读取未结束均让case失败。预期只读进程的退出另记，不证明Agent的OS隔离。临时日志、请求正文和报告留在本机。不得对保留的用户会话执行，也不得将其称为云端、音频、浏览器视觉或物理时延验收。
+原生诊断允许固定校验的转译器、已核安装Git在独占目录执行的唯一精确工作区定位读取及其已哈希Windows Job启动器，以及独占provider端口。规则核realpath、二进制SHA和每个参数；Windows按不区分大小写比较规范路径。它拒绝其他子进程和网络请求，私有保存有界拒绝详情，并分别报告结构、guard与生命周期结果；即使可选插件吞掉异常，被拦调用仍让整个case失败。私有IPC在子进程内部发出 `SIGTERM` 进入真实launcher标准退出handler，强制终止或预期读取未结束均让case失败。预期只读进程的退出另记，不证明Agent的OS隔离。临时日志和请求正文留在本机；[脱敏结构检查点](docs/native-brief-010.json)分开记录成功的空闲退出与保留的取消错误。不得对保留的用户会话执行，也不得将其称为云端、音频、浏览器视觉或物理时延验收。
 
 控制任务与 quick 并行，无需等待 Max 主会话，且不作为普通深度续接重复提交。Provider 解析已批准的唯一设备，写一次，再独立发起带查询身份的新读回；协议读回匹配与物理生效证据不同，红外空调尤其如此。同一物理设备串行，不同设备可并行；新目标使旧的排队动作失效。写结果未知不盲重试。私有队列日志 flush 控制快照；重启后显式重复请求仅用读回核对不确定动作，不重写，也不声称原先时延已知。这是协作式调度，不是任意 shell 的安全沙箱。
 

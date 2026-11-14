@@ -135,6 +135,24 @@ try {
     && JSON.stringify(e.data.event.data).includes(rewritten)), 'Parent rewrite did not settle as a real assistant message');
   assert.ok(events.some(e => e.type === 'child.started') && events.some(e => e.type === 'child.ended'));
   assert.ok(events.some(e => e.type === 'session' && ['agent-message', 'subagent-settled'].includes(e.data.event.data?.source?.kind)), 'Actual parent did not receive a child notice');
+  const finalMessage = events.findLast(e => e.type === 'session' && e.data.sessionId === config.sessionId
+    && e.data.event.type === 'assistant/message' && JSON.stringify(e.data.event.data).includes(rewritten));
+  let quiescent = false;
+  while (performance.now() < deadline) {
+    const state = await api('/state');
+    const latest = (await api('/events?after=0')).events;
+    const facts = JSON.parse(await readFile(join(root, 'fence.json'), 'utf8'));
+    assert.ok(!facts.expectedStartupReads.some(item => item.rangeErrorType), 'Actual managed-range observation failed before shutdown');
+    const turnEnded = latest.some(e => e.sequence > finalMessage.sequence && e.type === 'session'
+      && e.data.sessionId === config.sessionId && e.data.event.type === 'turn/end');
+    if (turnEnded && state.status === 'idle' && facts.expectedStartupReads.every(item => item.settled
+      && (item.layer === 'node' ? item.directChildExited : item.rangeEmpty))) {
+      report.preStopObservedQuiescence = { turnEnded, nativeIdle: true, expectedReads: facts.expectedStartupReads };
+      quiescent = true; break;
+    }
+    await delay(25);
+  }
+  assert.ok(quiescent, 'Native final turn and expected processes did not settle before shutdown');
   assert.equal(secretHeaderRejected, false); report.events = events; report.status = 'PASS';
 } catch (error) { report.status = 'FAIL'; report.error = { name: error.name, message: error.message }; }
 finally {
