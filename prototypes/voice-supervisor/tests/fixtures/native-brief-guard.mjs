@@ -2,11 +2,12 @@
 import cp from 'node:child_process';
 import net from 'node:net';
 import { syncBuiltinESMExports } from 'node:module';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { basename, resolve, join } from 'node:path';
 import { gitReadRule } from './native-brief-git-rule.mjs';
 import { runnerReadRule } from './native-brief-runner-rule.mjs';
+import { observeOwnedRead } from './native-brief-owned-read.mjs';
 
 const root = process.env.VOICE_NATIVE_FIXTURE_ROOT;
 const facts = { unknownSpawn: [], deniedNetwork: 0, transpilerChildren: [], subprocessDenied: 0, expectedStartupReads: [] };
@@ -16,6 +17,7 @@ const allowedRead = gitReadRule(join(root, 'workspace'));
 const allowedRunner = runnerReadRule(process.env.VOICE_NATIVE_REPO, join(root, 'workspace'));
 let startupSpec;
 const startupEvidence = [];
+const startupErrors = [];
 function retainDenial(api, argv, cwd) {
   if (denials.length < 16) denials.push({ api,
     argv: Array.isArray(argv) ? argv.slice(0, 24).map(arg => String(arg).slice(0, 256)) : null,
@@ -86,11 +88,20 @@ for (const name of ['spawn', 'spawnTerminal']) LocalSubprocessRuntime.prototype[
     startupSpec = spec;
     try { handle = runtimeSpawn.call(this, spec); }
     finally { startupSpec = undefined; }
-    void handle.done.then(async outcome => {
-      entry.exitCode = outcome.exitCode;
-      entry.rangeEmpty = await handle.waitForExit();
-      entry.settled = true; save();
-    }).catch(error => { entry.errorType = error.name; save(); });
+    const failure = (phase, error) => {
+      entry[phase + 'ErrorType'] = error.name;
+      entry.signalAborted = spec.signal?.aborted === true;
+      entry.launcherExitRequested = existsSync(join(root, 'native-app-exit-request.json'));
+      if (startupErrors.length < 16) startupErrors.push({ phase,
+        name: error.name, message: String(error.message).slice(0, 1024), stack: error.stack?.slice(0, 4096),
+        signalAborted: entry.signalAborted, launcherExitRequested: entry.launcherExitRequested });
+      writeFileSync(join(root, 'fence-expected-errors.private.json'), JSON.stringify(startupErrors, null, 2));
+      save();
+    };
+    // Direct outcome and managed-range emptiness are different provider facts.
+    // Always wait for both, including cancellation or a rejected direct result.
+    void observeOwnedRead(handle, entry, failure, save)
+      .catch(error => { entry.observerErrorType = error.name; save(); });
     return handle;
   }
   facts.subprocessDenied++;

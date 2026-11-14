@@ -12,6 +12,27 @@ import { gitReadRule, gitReadPath, gitReadArgs } from './fixtures/native-brief-g
 import { runnerReadRule, runnerNodePath } from './fixtures/native-brief-runner-rule.mjs';
 import { isOwnedStop, bindOwnedStop } from './fixtures/native-brief-policy.mjs';
 import { Context } from '@deepseek-ai/cordis';
+import { observeOwnedRead } from './fixtures/native-brief-owned-read.mjs';
+
+test('rejected direct outcome still waits for the real range result', async () => {
+  const empty = Promise.withResolvers(), entry = { settled: false, rangeEmpty: false }, errors = [];
+  let waits = 0;
+  const observing = observeOwnedRead({ done: Promise.reject(new Error('public-close-result')),
+    waitForExit() { waits++; return empty.promise; } }, entry, (phase, error) => errors.push({ phase, message: error.message }), () => {});
+  await new Promise(done => setImmediate(done));
+  assert.equal(waits, 1);
+  assert.equal(entry.settled, false);
+  assert.deepEqual(errors, [{ phase: 'direct', message: 'public-close-result' }]);
+  empty.resolve(true); await observing;
+  assert.equal(entry.settled, true);
+  assert.equal(entry.rangeEmpty, true);
+  const failed = { settled: false, rangeEmpty: false };
+  await observeOwnedRead({ done: Promise.resolve({ exitCode: 128 }), waitForExit: () => Promise.reject(new Error('range-unobserved')) },
+    failed, (phase, error) => errors.push({ phase, message: error.message }), () => {});
+  assert.equal(failed.settled, true);
+  assert.equal(failed.rangeEmpty, false, 'a rejected observation must never invent an empty range');
+  assert.equal(errors.at(-1).phase, 'range');
+});
 
 test('private stop IPC rejects wrong owner and malformed messages', () => {
   const nonce = 'public-owner-12345678';
