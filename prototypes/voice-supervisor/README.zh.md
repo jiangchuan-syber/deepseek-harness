@@ -59,6 +59,10 @@ overlay 读取 `VOICE_SIMPLE_CONTROL_CONFIG` JSON，缺省为 `{ "enabled": fals
 
 `node --import tsx/esm prototypes/voice-supervisor/tests/outer-control-integration.mjs` 是显式离线跨仓夹具。设置 `VOICE_CONTROL_TEST_PYTHON` 指向 Python，`VOICE_CONTROL_BRIDGE_SOURCE` 指向包含程序控制消费逻辑的 ESP32 候选 `server` 目录；可选 `VOICE_CONTROL_OUTER_REPORT`。它在独占临时进程中运行真实 interactive HTTP/SSE、插件、私有 Python fixture broker、桥接生成器与 FlowTrace；仅替换原生启动／模型边界，其他子进程和非独占 fetch 均拒绝。公开输入覆盖 Max 始终繁忙时的语音／请求／目标版本贯穿、成功静默、鉴权、写入及读回超时仍不重写，以及旧事实不能改挂新轮次。不会使用生产配置、云、音频或真实家电。完整 Cordis 启动／持久化、模型语义、视觉渲染和物理时延仍不在覆盖内。报告与合成临时工作区保留供检查，不提交。
 
+`node prototypes/voice-supervisor/tests/native-brief-integration.mjs` 是独立的无密钥原生结构诊断。先在依赖和输出目录均独占的隔离checkout运行官方 `pnpm run build:artifacts --serial`。它以私有 `DSH_HOME` 和工作区启动真实CLI Web profile、Cordis、工具与子Agent，只连接一个合成本机Messages提供方。启动以launcher的 `appReady` 和鉴权状态接口为证，较早的语音插件ready文件不算。该case检查子任务派发、收件箱回传和主会话另一次生成的新汇总。合成回复只证明通信结构，不证明模型判断；子Agent在同一进程内，不证明OS进程隔离或强制终止任务。
+
+原生诊断只允许固定校验的转译器子进程与独占provider端口，拒绝任务子进程和其他网络请求，私有保存有界拒绝详情，并分别报告结构与guard结果；即使可选插件吞掉异常，被拦调用仍让整个case失败。临时日志、请求正文和报告留在本机。不得对保留的用户会话执行，也不得将其称为云端、音频、浏览器视觉或物理时延验收。
+
 控制任务与 quick 并行，无需等待 Max 主会话，且不作为普通深度续接重复提交。Provider 解析已批准的唯一设备，写一次，再独立发起带查询身份的新读回；协议读回匹配与物理生效证据不同，红外空调尤其如此。同一物理设备串行，不同设备可并行；新目标使旧的排队动作失效。写结果未知不盲重试。私有队列日志 flush 控制快照；重启后显式重复请求仅用读回核对不确定动作，不重写，也不声称原先时延已知。这是协作式调度，不是任意 shell 的安全沙箱。
 
 原生 `parent.inject()` 只注入内部执行事实，不唤醒新轮次；成功动作不额外播报确认。仍属当前目标的拒绝或未知结果另排仅汇报的主会话轮次，不重新派发动作。插件 `/state.controls` 和 `control.state` 记录命令身份、目标版本、执行与读回事实。外层运行器另提供鉴权 `/control-events` SSE、`/state.controls` 与 `/trace.state.controls`；后两者共享带控制器来源及游标的有界元数据投影。控制事件在下次原生轮询前更新投影。这些是程序事实，不伪造模型工具调用；消费端匹配准确请求与语音会话。单调预算及夹具测试不等于物理松键到有效读回三秒验收。
