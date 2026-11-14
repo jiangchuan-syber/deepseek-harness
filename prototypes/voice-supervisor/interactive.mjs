@@ -127,6 +127,11 @@ const poller = setInterval(async () => {
         continueDeep(eventOwner);
       }
       if (e.type === 'quick.aborted') speechEvents.push({ kind: 'abort', outputId: e.data.attemptId });
+      if (e.type === 'quick.superseded') {
+        trace({ at: e.time, kind: 'front.superseded', actor: '快速接话', title: '过时接话已取消，原始需求仍交主调度',
+          details: { supersededBy: e.data.supersededBy } }, eventOwner);
+        continueDeep(eventOwner);
+      }
       if (e.type === 'quick.failed' || e.type === 'quick.continuation_failed') {
         const text = e.type === 'quick.failed' ? '快速接话失败，主调度继续处理。' : '任务未能进入主调度队列，请检查运行日志。';
         trace({ at: e.time, kind: 'front.error', actor: '快速接话', title: text, details: { errorType: e.data.errorType } }, eventOwner);
