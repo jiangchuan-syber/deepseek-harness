@@ -16,10 +16,13 @@
         readyFile: !!js process.env.VOICE_LAB_READY_FILE
         cwd: !!js process.env.VOICE_LAB_CWD
         supervisorReasoningEffort: max
+        simpleControl: !!js JSON.parse(process.env.VOICE_SIMPLE_CONTROL_CONFIG ?? '{"enabled":false}')
         quick:
           contextChars: 1200
           inputChars: 600
           maxTokens: 64
           maxChars: 30
           timeoutMs: 15000
+          cancelGraceMs: 50
+          maxOutstanding: 2
           capacity: 32

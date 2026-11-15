@@ -51,3 +51,17 @@ test('failed durable admission cannot execute a rejected request later', () => {
   assert.equal(q.inputs.length, 0); assert.equal(q.seen.size, 0);
   assert.equal(q.running, null); assert.equal(calls, 0);
 });
+
+test('report-only control facts never merge with ordinary user continuations', async () => {
+  const started = barrier(), release = barrier(), batches = [];
+  const q = new StageQueue({ observe() {}, run: async (_phase, job, batch) => {
+    batches.push(batch.map(item => item.requestId));
+    if (job.requestId === 'busy') { started.resolve(); await release.promise; }
+  } });
+  q.enqueue({ requestId: 'busy' }, { quickDone: true }); await started.promise;
+  q.enqueue({ requestId: 'normal-a' }, { quickDone: true });
+  q.enqueue({ requestId: 'report', controlReport: { status: 'unknown' } }, { quickDone: true });
+  q.enqueue({ requestId: 'normal-b' }, { quickDone: true });
+  release.resolve(); await q.running;
+  assert.deepEqual(batches, [['busy'], ['normal-a'], ['report'], ['normal-b']]);
+});

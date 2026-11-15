@@ -1,0 +1,16 @@
+# Bilingual-pair consistency record for guide.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/upgrade-guide/v0.2.2-alpha.2/voice-quick-cancellation-budgets/guide.md
+/:
+  en: 48f51159c926b900
+  zh: 931ac309c02bcdf5
+/voice-acknowledgement-cancellation-budgets:
+  en: 5951077ecb693e83
+  zh: 69e4b45045daf230
+/voice-acknowledgement-cancellation-budgets/change:
+  en: 3af40d37f1afb31c
+  zh: fe2bc74a3a1a7885
+/voice-acknowledgement-cancellation-budgets/migration:
+  en: da4e28eac05448a7
+  zh: 3cae13abf7909426

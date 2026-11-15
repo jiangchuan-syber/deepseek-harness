@@ -1,3 +1,5 @@
+import { controlSnapshot } from './control-view.mjs';
+
 /** Project only visible messages and tool traffic; never expose thinking blocks. */
 export function visibleText(content) {
   return (Array.isArray(content) ? content : []).filter(item => item.type === 'text').map(item => item.text).join('\n');
@@ -15,6 +17,7 @@ export function publicSessionEvent(event) {
 
 export function traceState(state) {
   return { sessionId: state.sessionId, status: state.status, phase: state.phase, queue: state.queue,
+    ...controlSnapshot(state),
     children: (state.children ?? []).map(child => ({ id: child.id, ended: child.ended,
       stopReason: child.stopReason, provider: child.provider })) };
 }
