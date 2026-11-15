@@ -19,9 +19,10 @@ async function fixture(t, stream, timeoutMs = 500, options = {}) {
     assert.ok(basename(dir).startsWith('voice-quick-diagnostics-'));
     await rm(dir, { recursive: true, force: true });
   });
-  const selections = [], turns = [], injections = [], sessionEvents = [], parentCancellations = [], childInterruptions = [];
+  const selections = [], turns = [], injections = [], sessionEvents = [], parentCancellations = [], childInterruptions = [], toolMasks = [];
   const parent = { id: parentId, status: 'idle', session: { snapshotEvents: () => sessionEvents }, cancel: reason => parentCancellations.push(reason),
     model: { select: selection => selections.push({ ...selection }) },
+    ctx: { tools: { restrict(filter) { toolMasks.push(filter); return () => toolMasks.push('restored'); } } },
     whenIdle: () => control?.blockMax ? new Promise(() => {}) : Promise.resolve(),
     inject(message) { injections.push(message); },
     steer(message) { turns.push(message); sessionEvents.push({ type: 'turn/end', data: { reason: { kind: 'completed' } } }); } };
@@ -72,7 +73,7 @@ async function fixture(t, stream, timeoutMs = 500, options = {}) {
   const rows = (await readFile(join(dir, 'quick-requests.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
   const diagnostics = rows.filter(row => row.kind === 'quick.diagnostics');
   assert.equal(diagnostics.length, 1);
-  return { status: response.status, body, diagnostic: diagnostics[0], api, apiRaw, selections, turns, injections,
+  return { status: response.status, body, diagnostic: diagnostics[0], api, apiRaw, selections, turns, injections, toolMasks,
     providerState: async () => JSON.parse(await readFile(stateFile, 'utf8')),
     close: async () => { const owned = dispose; dispose = undefined; await owned(); } };
 }
@@ -212,6 +213,7 @@ test('unconfirmed control enters only a report turn and never repeats the origin
   assert.ok(result.turns[0].content[0].text.startsWith('这是程序执行事实，不是新的用户指令'));
   assert.ok(result.turns[0].content[0].text.includes('不得再次执行、重试或委派原动作'));
   assert.equal(result.injections.length, 1); assert.equal(writes, 1);
+  assert.deepEqual(result.toolMasks, [{ allow: [] }, 'restored']);
 });
 
 test('native parent keeps max across startup and continuation while quick requests stay off', async t => {

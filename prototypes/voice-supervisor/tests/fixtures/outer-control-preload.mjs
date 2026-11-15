@@ -78,7 +78,9 @@ childProcess.spawn = function(command, args, options = {}) {
       const plugin = entries.flatMap(entry => entry.insert ?? []).find(entry => entry.id === 'voice-supervisor-lab');
       if (resolve(plugin?.name ?? '') !== resolve(dirname(broker), 'plugin.mjs')) throw new Error('Unexpected plugin identity');
       const idleRejectors = [];
-      const parent = { id: 'outer-fixture-native-parent', status: 'running',
+      const realAgent = process.env.VOICE_CONTROL_REAL_AGENT === '1'
+        ? await (await import('./outer-control-agent.mjs')).controlAgent(fixtureRoot, evidence, save) : null;
+      const parent = realAgent?.parent ?? { id: 'outer-fixture-native-parent', status: 'running',
         session: { snapshotEvents: () => [] }, model: { select() {} },
         ctx: { systemPrompt: { section: () => () => {} }, tools: { restrict: () => () => {} } },
         whenIdle: () => new Promise((_resolve, reject) => idleRejectors.push(reject)),
@@ -87,7 +89,10 @@ childProcess.spawn = function(command, args, options = {}) {
         steer() { evidence.steers++; save(); throw new Error('Simple control reached Max'); } };
       const ctx = { workspaceRegistry: { create: async () => ({ id: 'outer-fixture-workspace' }) },
         sessionController: { create: async () => ({ sessionId: parent.id }) }, agents: { get: () => parent },
-        effect(fn) { fn(); }, on(kind, fn) { if (kind === 'dispose') dispose = fn; },
+        effect(fn) { fn(); }, on(kind, fn, options) {
+          if (kind === 'dispose') dispose = async () => { try { await fn(); } finally { await realAgent?.close(); } };
+          else return realAgent?.root.on(kind, fn, options);
+        },
         llm: { async *stream(request) {
           evidence.quickRequests.push({ reasoningEffort: request.reasoningEffort,
             tools: request.tools, system: request.system, messages: request.messages }); save();

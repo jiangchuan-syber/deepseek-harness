@@ -83,8 +83,9 @@ export async function apply(ctx, config) {
       parent.model.select({ provider: 'deepseek-official', model: process.env.VOICE_MODEL,
         reasoningEffort: phase === 'quick' ? 'off' : config.supervisorReasoningEffort });
       const before = parent.session.snapshotEvents().length;
-      const restore = phase === 'quick' ? parent.ctx.tools.restrict({ allow: [] }) : () => {};
-      record('phase', { phase, owner, thinking: phase === 'quick' ? 'disabled' : 'enabled' });
+      const reportOnly = Boolean(job.controlReport);
+      const restore = phase === 'quick' || reportOnly ? parent.ctx.tools.restrict({ allow: [] }) : () => {};
+      record('phase', { phase, owner, reportOnly, thinking: phase === 'quick' ? 'disabled' : 'enabled' });
       try {
         if (phase === 'quick') throw new Error('Quick replies use the independent lane');
         else if (job.controlReport) {
@@ -262,8 +263,8 @@ export async function apply(ctx, config) {
   });
   for (const fact of recovered) if (fact.kind === 'input.queued') quickLane.seen.add(fact.job.requestId);
 
-  ctx.on('tools/pre-execute', (exec, next) => exec.agent.id === sessionId && phase === 'quick'
-    ? Promise.resolve({ kind: 'deny', reason: 'Quick response stage has no execution permission' }) : next(), { global: true });
+  ctx.on('tools/pre-execute', (exec, next) => exec.agent.id === sessionId && (phase === 'quick' || owner?.controlReport)
+    ? Promise.resolve({ kind: 'deny', reason: 'Voice response stage has no execution permission' }) : next(), { global: true });
   ctx.on('agent/pre-step', async ({ agent, step }, next) => {
     const decision = await next();
     // Rebase tool declarations after the tool-free phase; an all-deferred list is invalid upstream.
